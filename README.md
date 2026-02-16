@@ -1,30 +1,59 @@
-# Archive
+# Latch
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+**Latching G-Addresses to C-Addresses on Stellar.**
 
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/shared-8867s-projects/v0-archive)
-[![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/projects/7OBKdWwIbzR)
+Latch provides open-source C-address onboarding infrastructure for Stellar, enabling users to create and fund Soroban Smart Accounts without ever touching a traditional G-address.
 
-## Overview
+## Features
 
-This repository will stay in sync with your deployed chats on [v0.app](https://v0.app).
-Any changes you make to your deployed app will be automatically pushed to this repository from [v0.app](https://v0.app).
+- **Latch Bridge**: A funding bridge protocol for G-to-C address funding.
+- **Latch Wallet**: A reference Smart Account wallet implementation (Protocol 20+).
+- **Latch SDK**: TypeScript and Rust libraries for developers to integrate C-address support.
 
-## Deployment
+## Getting Started
 
-Your project is live at:
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
 
-**[https://vercel.com/shared-8867s-projects/v0-archive](https://vercel.com/shared-8867s-projects/v0-archive)**
+### Prerequisites
 
-## Build your app
+- Node.js (Latest LTS recommended)
+- `npm` or `yarn` or `pnpm`
 
-Continue building your app on:
+### Installation
 
-**[https://v0.app/chat/projects/7OBKdWwIbzR](https://v0.app/chat/projects/7OBKdWwIbzR)**
+```bash
+npm install
+# or
+yarn install
+# or
+pnpm install
+```
 
-## How It Works
+### Running the Development Server
 
-1. Create and modify your project using [v0.app](https://v0.app)
-2. Deploy your chats from the v0 interface
-3. Changes are automatically pushed to this repository
-4. Vercel deploys the latest version from this repository
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Project Structure
+
+- `app/`: Next.js App Router pages and layouts.
+- `components/`: React components.
+  - `components/gl`: Three.js / React Three Fiber 3D components.
+  - `components/ui`: Reusable UI components (likely Shadcn/Radix based).
+- `lib/`: Utility functions and shared logic.
+- `public/`: Static assets.
+
+## Documentation
+
+For the full project proposal and detailed technical specifications, see [PROJECT_PROPOSAL.md](./PROJECT_PROPOSAL.md).
+
+## License
+
+MIT

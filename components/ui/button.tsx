@@ -11,10 +11,14 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: "bg-background border-primary text-primary-foreground [&>[data-border]]:bg-primary [box-shadow:inset_0_0_54px_0px_var(--tw-shadow-color)] shadow-[#EBB800] hover:shadow-[#EBB800]/80",
+        rounded: "bg-primary text-primary-foreground hover:bg-primary/90 rounded-full [clip-path:none] border-none [&_[data-border]]:hidden",
+        outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-full [clip-path:none] [&_[data-border]]:hidden",
       },
       size: {
         default: "h-16 px-6 text-base",
         sm: "h-14 px-6 text-sm",
+        lg: "h-11 px-8",
+        icon: "h-10 w-10",
       },
     },
     defaultVariants: {

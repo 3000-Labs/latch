@@ -45,40 +45,31 @@ export const MobileMenu = ({ className }: MobileMenuProps) => {
           className="fixed z-30 inset-0 bg-black/50 backdrop-blur-sm"
         />
 
-        <Dialog.Content
-          onInteractOutside={(e) => {
-            if (
-              e.target instanceof HTMLElement &&
-              e.target.dataset.overlay !== "true"
-            ) {
-              e.preventDefault();
-            }
-          }}
-          className="fixed top-0 left-0 w-full z-40 py-28 md:py-40"
+    <Dialog.Content
+           className="fixed top-0 left-0 w-full h-full z-40 bg-background/95 backdrop-blur-sm p-8 pt-20"
         >
           <Dialog.Title className="sr-only">Menu</Dialog.Title>
-
+           <Dialog.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+            <X className="h-6 w-6" />
+            <span className="sr-only">Close</span>
+          </Dialog.Close>
           <nav className="flex flex-col space-y-6 container mx-auto">
-            {menuItems.map((item) => (
-              <Link
-                key={item.name}
-                href={item.href}
-                onClick={handleLinkClick}
-                className="text-xl font-mono uppercase text-foreground/60 transition-colors ease-out duration-150 hover:text-foreground/100 py-2"
+               <Link
+                href="https://www.notion.so/Latch-C-Address-Onboarding-Infrastructure-3096bfb65b0f80cca03ef84ed890b599?source=copy_link"
+                target="_blank"
+                onClick={() => setIsOpen(false)}
+                 className="text-xl font-mono uppercase text-foreground/60 transition-colors ease-out duration-150 hover:text-foreground/100 py-2"
               >
-                {item.name}
+                Architecture
               </Link>
-            ))}
-
-            <div className="mt-6">
-              <Link
-                href="/#sign-in"
-                onClick={handleLinkClick}
-                className="inline-block text-xl font-mono uppercase text-primary transition-colors ease-out duration-150 hover:text-primary/80 py-2"
+               <Link
+                href="https://x.com/frankyejezie"
+                target="_blank"
+                onClick={() => setIsOpen(false)}
+                 className="text-xl font-mono uppercase text-foreground/60 transition-colors ease-out duration-150 hover:text-foreground/100 py-2"
               >
-                Sign In
+                Contact
               </Link>
-            </div>
           </nav>
         </Dialog.Content>
       </Dialog.Portal>
