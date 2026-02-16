@@ -10,9 +10,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Skal Ventures",
-  description: "Investment strategies that outperform the market",
-    generator: 'v0.app'
+  title: "Latch",
+  description: "Latching G-Addresses to C-Addresses on Stellar",
 };
 
 export default function RootLayout({
