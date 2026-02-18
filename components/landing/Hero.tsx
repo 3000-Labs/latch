@@ -26,9 +26,11 @@ export function Hero() {
               [Architecture]
             </Button>
           </Link>
-          <Button size="lg" variant="outline" className="font-mono h-12 px-8" disabled>
-            [Launch - Soon]
-          </Button>
+          <Link href="/demo">
+            <Button size="lg" variant="outline" className="font-mono h-12 px-8">
+              [Demo]
+            </Button>
+          </Link>
         </div>
       </div>
       
