@@ -3,15 +3,15 @@
 import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { BrowserSDK, AddressType } from "@phantom/browser-sdk";
 import bs58 from "bs58"; // Import base58 decoder
 
-// Initialize the SDK
-// In a real app, you might want this in a context or custom hook
-const sdk = new BrowserSDK({
-  providers: ["injected"], // Focus on extension for this demo
-  addressTypes: [AddressType.solana],
-});
+// Helper to get Phantom provider
+const getPhantomProvider = () => {
+  if (typeof window === "undefined") return null;
+  const provider = (window as any).phantom?.solana;
+  if (provider?.isPhantom) return provider;
+  return null;
+};
 
 type DemoState =
   | "disconnected"
@@ -54,16 +54,22 @@ export default function DemoPage() {
     setError(null);
 
     try {
-      // Use SDK to connect
-      await sdk.connect({ provider: "injected" });
-      const pubkey = await sdk.solana.getPublicKey();
-      
+      // Get Phantom provider directly
+      const provider = getPhantomProvider();
+      if (!provider) {
+        throw new Error("Phantom wallet not found. Please install Phantom extension.");
+      }
+
+      // Connect to Phantom
+      const response = await provider.connect();
+      const pubkey = response.publicKey || provider.publicKey;
+
       if (!pubkey) {
         throw new Error("Failed to get public key from Phantom");
       }
 
       // Convert Base58 pubkey to Hex
-      const pubkeyBase58 = pubkey.toString(); // PublicKey object has toString() which returns Base58
+      const pubkeyBase58 = pubkey.toString();
       const pubkeyBytes = bs58.decode(pubkeyBase58);
       const pubkeyHex = Buffer.from(pubkeyBytes).toString("hex");
 
@@ -138,9 +144,14 @@ export default function DemoPage() {
       console.log("Transaction hash:", transactionHash);
       console.log("Valid until ledger:", validUntilLedger);
 
-      // Step 2: Sign BOTH hashes with Phantom
+      // Step 2: Sign BOTH hashes with Phantom (using direct provider)
       setState("signing");
       console.log("Requesting Phantom signatures...");
+
+      const provider = getPhantomProvider();
+      if (!provider) {
+        throw new Error("Phantom wallet not connected");
+      }
 
       // Phantom blocks raw 32-byte messages (look like Solana tx hashes)
       // We need to prefix with human-readable text
@@ -149,31 +160,21 @@ export default function DemoPage() {
       const TX_PREFIX = "Stellar Transaction:\n";
 
       // Sign the auth payload hash (for smart account authorization)
-      // The message includes a prefix + the hex hash (not raw bytes)
       console.log("Signing auth payload...");
-      
-      console.log("Signing auth payload...");
-      
       const authMessage = new TextEncoder().encode(AUTH_PREFIX + authPayloadHash);
-      // Using the SDK to sign the message
-      const authSignResult = await sdk.solana.signMessage(authMessage);
-      
-      console.log("Auth signature result:", authSignResult);
-      
-      // The SDK returns { signature: Uint8Array } for injected provider
-      // We can directly convert the Uint8Array to Hex.
-      const authSignatureHex = Buffer.from(authSignResult.signature as unknown as Uint8Array).toString("hex");
+      const authSignResult = await provider.signMessage(authMessage, "utf8");
 
-      console.log("Auth signature execution complete.");
+      console.log("Auth signature result:", authSignResult);
+      const authSignatureHex = Buffer.from(authSignResult.signature).toString("hex");
+      console.log("Auth signature hex:", authSignatureHex);
 
       // Sign the transaction hash (for envelope signature)
       console.log("Signing transaction envelope...");
       const txMessage = new TextEncoder().encode(TX_PREFIX + transactionHash);
-      const envelopeSignResult = await sdk.solana.signMessage(txMessage);
-      
-      const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature as unknown as Uint8Array).toString("hex");
-      
-      console.log("Envelope signature received:", envelopeSignatureHex);
+      const envelopeSignResult = await provider.signMessage(txMessage, "utf8");
+
+      const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature).toString("hex");
+      console.log("Envelope signature hex:", envelopeSignatureHex);
 
       console.log("Note: Signatures are over prefixed messages, not raw hashes");
       
@@ -219,6 +220,51 @@ export default function DemoPage() {
       setError(err instanceof Error ? err.message : "Transaction failed");
     }
   }, [phantomPubkeyHex, smartAccountAddress, gAddress]);
+
+  const testPhantomSign = useCallback(async () => {
+    try {
+      console.log("🧪 Testing Phantom signMessage DIRECTLY via window.solana...");
+
+      // Debug: Check what's available
+      console.log("window.phantom:", (window as any).phantom);
+      console.log("window.solana:", (window as any).solana);
+
+      // Access Phantom directly, bypass the SDK
+      const provider = (window as any).phantom?.solana;
+      console.log("provider:", provider);
+      console.log("provider.isPhantom:", provider?.isPhantom);
+      console.log("provider.isConnected:", provider?.isConnected);
+      console.log("provider.publicKey:", provider?.publicKey);
+
+      if (!provider?.isPhantom) {
+        throw new Error("Phantom wallet not found");
+      }
+
+      // Ensure connected
+      if (!provider.isConnected) {
+        console.log("Not connected, calling connect()...");
+        const result = await provider.connect();
+        console.log("Connect result:", result);
+      }
+
+      // Sign using the standard Solana wallet interface
+      console.log("Attempting to sign message...");
+      const message = new TextEncoder().encode("Hello World");
+      console.log("Message bytes:", message);
+
+      const result = await provider.signMessage(message, "utf8");
+      console.log("signMessage result:", result);
+
+      console.log("✅ Direct Phantom sign SUCCESS!");
+      console.log("Signature:", result.signature);
+      console.log("Public key:", result.publicKey?.toString());
+      alert("✅ Direct signing works! Check console.");
+    } catch (err) {
+      console.error("❌ Direct sign FAILED:", err);
+      console.error("Error details:", { name: (err as any)?.name, message: (err as any)?.message, stack: (err as any)?.stack });
+      alert(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
 
   const disconnect = useCallback(async () => {
     // SDK doesn't have a clear 'disconnect' method in the docs shown, 
@@ -390,6 +436,14 @@ export default function DemoPage() {
                   className="w-full font-mono"
                 >
                   Execute via Smart Account
+                </Button>
+                <Button
+                  onClick={testPhantomSign}
+                  variant="secondary"
+                  size="lg"
+                  className="w-full font-mono"
+                >
+                  🧪 Test Phantom Signing
                 </Button>
                 <Button
                   onClick={disconnect}
