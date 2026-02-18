@@ -3,6 +3,15 @@
 import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { BrowserSDK, AddressType } from "@phantom/browser-sdk";
+import bs58 from "bs58"; // Import base58 decoder
+
+// Initialize the SDK
+// In a real app, you might want this in a context or custom hook
+const sdk = new BrowserSDK({
+  providers: ["injected"], // Focus on extension for this demo
+  addressTypes: [AddressType.solana],
+});
 
 type DemoState =
   | "disconnected"
@@ -28,8 +37,12 @@ export default function DemoPage() {
 
   // Check if Phantom is available (only on client)
   useEffect(() => {
-    const checkPhantom = () => {
-      const available = !!(window as unknown as { solana?: { isPhantom?: boolean } }).solana?.isPhantom;
+    // We can check if window.solana is present, or just let strict 'injected' provider handle it.
+    // For UI feedback, checking window.phantom?.solana or similar is still useful.
+    const checkPhantom = async () => {
+      // Small delay to allow injection
+      await new Promise(r => setTimeout(r, 500));
+      const available = !!(window as any)?.phantom?.solana?.isPhantom;
       setIsPhantomAvailable(available);
     };
     checkPhantom();
@@ -41,23 +54,23 @@ export default function DemoPage() {
     setError(null);
 
     try {
-      const solana = (window as unknown as { solana?: {
-        isPhantom?: boolean;
-        connect: () => Promise<{ publicKey: { toString: () => string; toBytes: () => Uint8Array } }>;
-      } }).solana;
-
-      if (!solana?.isPhantom) {
-        throw new Error("Phantom wallet not found. Install it from phantom.app");
+      // Use SDK to connect
+      await sdk.connect({ provider: "injected" });
+      const pubkey = await sdk.solana.getPublicKey();
+      
+      if (!pubkey) {
+        throw new Error("Failed to get public key from Phantom");
       }
 
-      const response = await solana.connect();
-      const pubkey = response.publicKey;
-      const pubkeyHex = Buffer.from(pubkey.toBytes()).toString("hex");
+      // Convert Base58 pubkey to Hex
+      const pubkeyBase58 = pubkey.toString(); // PublicKey object has toString() which returns Base58
+      const pubkeyBytes = bs58.decode(pubkeyBase58);
+      const pubkeyHex = Buffer.from(pubkeyBytes).toString("hex");
 
-      setPhantomPubkey(pubkey.toString());
+      setPhantomPubkey(pubkeyBase58);
       setPhantomPubkeyHex(pubkeyHex);
 
-      console.log("Phantom connected:", pubkey.toString());
+      console.log("Phantom connected:", pubkeyBase58);
       console.log("Pubkey hex:", pubkeyHex);
 
       // Deploy/get smart account for this user
@@ -88,6 +101,7 @@ export default function DemoPage() {
 
       setState("ready");
     } catch (err) {
+      console.error("Connection error:", err);
       setState("error");
       setError(err instanceof Error ? err.message : "Failed to connect");
     }
@@ -128,19 +142,6 @@ export default function DemoPage() {
       setState("signing");
       console.log("Requesting Phantom signatures...");
 
-      const solana = (window as unknown as {
-        solana?: {
-          signMessage: (
-            message: Uint8Array,
-            encoding: string
-          ) => Promise<{ signature: Uint8Array; publicKey: { toBytes: () => Uint8Array } }>;
-        };
-      }).solana;
-
-      if (!solana) {
-        throw new Error("Phantom wallet not found");
-      }
-
       // Phantom blocks raw 32-byte messages (look like Solana tx hashes)
       // We need to prefix with human-readable text
       // NOTE: The on-chain smart account verifier MUST expect this same format
@@ -150,20 +151,32 @@ export default function DemoPage() {
       // Sign the auth payload hash (for smart account authorization)
       // The message includes a prefix + the hex hash (not raw bytes)
       console.log("Signing auth payload...");
+      
+      console.log("Signing auth payload...");
+      
       const authMessage = new TextEncoder().encode(AUTH_PREFIX + authPayloadHash);
-      const authSignResult = await solana.signMessage(authMessage, "utf8");
-      const authSignatureHex = Buffer.from(authSignResult.signature).toString("hex");
-      console.log("Auth signature received:", authSignatureHex);
+      // Using the SDK to sign the message
+      const authSignResult = await sdk.solana.signMessage(authMessage);
+      
+      console.log("Auth signature result:", authSignResult);
+      
+      // The SDK returns { signature: Uint8Array } for injected provider
+      // We can directly convert the Uint8Array to Hex.
+      const authSignatureHex = Buffer.from(authSignResult.signature as unknown as Uint8Array).toString("hex");
+
+      console.log("Auth signature execution complete.");
 
       // Sign the transaction hash (for envelope signature)
       console.log("Signing transaction envelope...");
       const txMessage = new TextEncoder().encode(TX_PREFIX + transactionHash);
-      const envelopeSignResult = await solana.signMessage(txMessage, "utf8");
-      const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature).toString("hex");
+      const envelopeSignResult = await sdk.solana.signMessage(txMessage);
+      
+      const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature as unknown as Uint8Array).toString("hex");
+      
       console.log("Envelope signature received:", envelopeSignatureHex);
 
       console.log("Note: Signatures are over prefixed messages, not raw hashes");
-
+      
       // Step 3: Submit the transaction via API
       setState("submitting");
       console.log("Submitting transaction...");
@@ -207,7 +220,14 @@ export default function DemoPage() {
     }
   }, [phantomPubkeyHex, smartAccountAddress, gAddress]);
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(async () => {
+    // SDK doesn't have a clear 'disconnect' method in the docs shown, 
+    // but usually we just reset local state for "disconnecting" in a dapp.
+    // phantom.md shows `sdk.disconnect()` isn't explicitly listed in the "Connect" section 
+    // but `sdk.on('disconnect')` exists.
+    // The previous code verified window.solana.
+    
+    // We will just reset state.
     setPhantomPubkey(null);
     setPhantomPubkeyHex(null);
     setSmartAccountAddress(null);
@@ -447,3 +467,4 @@ export default function DemoPage() {
     </div>
   );
 }
+
