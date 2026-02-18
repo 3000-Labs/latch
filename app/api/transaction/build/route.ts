@@ -94,10 +94,20 @@ export async function POST(request: NextRequest) {
     // This is hash(networkIdHash + ENVELOPE_TYPE_TX + tx)
     const txHash = tx.hash();
 
-    // Handle transactionData - may be XDR object or already a string
-    const transactionDataXdr = typeof simResult.transactionData === "string"
-      ? simResult.transactionData
-      : simResult.transactionData?.toXDR("base64");
+    // Handle transactionData - may be string, XDR object, or SorobanDataBuilder
+    let transactionDataXdr: string | undefined;
+    const txData = simResult.transactionData as unknown;
+
+    if (typeof txData === "string") {
+      transactionDataXdr = txData;
+    } else if (txData && typeof (txData as { toXDR?: unknown }).toXDR === "function") {
+      // Direct XDR object
+      transactionDataXdr = (txData as { toXDR: (format: string) => string }).toXDR("base64");
+    } else if (txData && typeof (txData as { build?: unknown }).build === "function") {
+      // SorobanDataBuilder - need to call build() first
+      const built = (txData as { build: () => { toXDR: (format: string) => string } }).build();
+      transactionDataXdr = built.toXDR("base64");
+    }
 
     return NextResponse.json({
       txXdr: tx.toXDR(),
@@ -105,7 +115,6 @@ export async function POST(request: NextRequest) {
       simulationResultXdr: JSON.stringify({
         transactionData: transactionDataXdr,
         minResourceFee: simResult.minResourceFee,
-        cost: simResult.cost,
         latestLedger: simResult.latestLedger,
       }),
       authPayloadHash: payloadHash.toString("hex"),

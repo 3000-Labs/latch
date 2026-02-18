@@ -141,24 +141,28 @@ export default function DemoPage() {
         throw new Error("Phantom wallet not found");
       }
 
-      // Helper to convert hex to bytes
-      const hexToBytes = (hex: string) => new Uint8Array(
-        hex.match(/.{1,2}/g)!.map((byte: string) => parseInt(byte, 16))
-      );
+      // Phantom blocks raw 32-byte messages (look like Solana tx hashes)
+      // We need to prefix with human-readable text
+      // NOTE: The on-chain smart account verifier MUST expect this same format
+      const AUTH_PREFIX = "Stellar Smart Account Auth:\n";
+      const TX_PREFIX = "Stellar Transaction:\n";
 
       // Sign the auth payload hash (for smart account authorization)
+      // The message includes a prefix + the hex hash (not raw bytes)
       console.log("Signing auth payload...");
-      const authPayloadBytes = hexToBytes(authPayloadHash);
-      const authSignResult = await solana.signMessage(authPayloadBytes, "utf8");
+      const authMessage = new TextEncoder().encode(AUTH_PREFIX + authPayloadHash);
+      const authSignResult = await solana.signMessage(authMessage, "utf8");
       const authSignatureHex = Buffer.from(authSignResult.signature).toString("hex");
       console.log("Auth signature received:", authSignatureHex);
 
       // Sign the transaction hash (for envelope signature)
       console.log("Signing transaction envelope...");
-      const txHashBytes = hexToBytes(transactionHash);
-      const envelopeSignResult = await solana.signMessage(txHashBytes, "utf8");
+      const txMessage = new TextEncoder().encode(TX_PREFIX + transactionHash);
+      const envelopeSignResult = await solana.signMessage(txMessage, "utf8");
       const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature).toString("hex");
       console.log("Envelope signature received:", envelopeSignatureHex);
+
+      console.log("Note: Signatures are over prefixed messages, not raw hashes");
 
       // Step 3: Submit the transaction via API
       setState("submitting");
@@ -431,6 +435,14 @@ export default function DemoPage() {
             <strong>This is Smart Account adoption.</strong> Your Phantom wallet controls a Soroban C-address.
             The same pattern works for MetaMask, Passkeys, or any Ed25519/secp256k1 signer.
           </p>
+
+          <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-md">
+            <p className="text-xs text-yellow-700">
+              <strong>Demo Note:</strong> Phantom&apos;s signMessage blocks raw 32-byte hashes for security.
+              The current implementation uses prefixed messages which may cause on-chain verification to fail.
+              A production deployment would use a smart account contract designed to expect this format.
+            </p>
+          </div>
         </div>
       </div>
     </div>

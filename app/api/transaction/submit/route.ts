@@ -68,7 +68,6 @@ export async function POST(request: NextRequest) {
     const simResultForAssembly = {
       transactionData: xdr.SorobanTransactionData.fromXDR(simResultData.transactionData, "base64"),
       minResourceFee: simResultData.minResourceFee,
-      cost: simResultData.cost,
       latestLedger: simResultData.latestLedger,
       result: {
         auth: [authEntry.toXDR("base64")],
