@@ -436,11 +436,10 @@ export default function DemoPage() {
             The same pattern works for MetaMask, Passkeys, or any Ed25519/secp256k1 signer.
           </p>
 
-          <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-md">
-            <p className="text-xs text-yellow-700">
-              <strong>Demo Note:</strong> Phantom&apos;s signMessage blocks raw 32-byte hashes for security.
-              The current implementation uses prefixed messages which may cause on-chain verification to fail.
-              A production deployment would use a smart account contract designed to expect this format.
+          <div className="mt-4 p-3 bg-green-500/10 border border-green-500/20 rounded-md">
+            <p className="text-xs text-green-700">
+              <strong>How it works:</strong> Phantom signs a prefixed message (&quot;Stellar Smart Account Auth:\n&quot; + hash).
+              The on-chain Ed25519 verifier reconstructs this format and validates the signature.
             </p>
           </div>
         </div>

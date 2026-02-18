@@ -8,7 +8,8 @@ const execAsync = promisify(exec);
 const { StrKey } = StellarSdk;
 
 // Contract addresses on testnet
-const VERIFIER_ADDRESS = "CCHVR2WS5FRHVEG7BLMBS6BADCBK54ZEGP7CA5X3T6TJFPCQIDHDVZFV";
+// New verifier that handles Phantom's prefixed message format
+const VERIFIER_ADDRESS = "CBOOH2MLTLRRONXKLX755IR6VU4EAXQEQDIK54HMBLGPOCGUNQ6TYF6F";
 const COUNTER_ADDRESS = "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U";
 const SMART_ACCOUNT_WASM_HASH = "cf67f31cbff555b5a6c1fb3ab4411b9cdf34e96d4d2cf52dbec5d1f13fc6db40";
 
@@ -88,8 +89,10 @@ export async function POST(request: NextRequest) {
     // Fund the user's G-address via Friendbot (testnet)
     await fundAccountIfNeeded(userGAddress);
 
-    // Generate deterministic salt from pubkey
-    const salt = crypto.createHash("sha256").update(publicKeyHex).digest("hex");
+    // Generate deterministic salt from pubkey + version
+    // Version 2: Uses new verifier that handles Phantom's prefixed message format
+    const SMART_ACCOUNT_VERSION = "v2";
+    const salt = crypto.createHash("sha256").update(publicKeyHex + SMART_ACCOUNT_VERSION).digest("hex");
 
     console.log(`Deploying smart account for pubkey: ${publicKeyHex}`);
     console.log(`Using salt: ${salt}`);

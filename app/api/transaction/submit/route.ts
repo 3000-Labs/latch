@@ -11,7 +11,8 @@ import {
 const TESTNET_CONFIG = {
   rpcUrl: "https://soroban-testnet.stellar.org",
   networkPassphrase: Networks.TESTNET,
-  verifierAddress: "CCHVR2WS5FRHVEG7BLMBS6BADCBK54ZEGP7CA5X3T6TJFPCQIDHDVZFV",
+  // New verifier that handles Phantom's prefixed message format
+  verifierAddress: "CBOOH2MLTLRRONXKLX755IR6VU4EAXQEQDIK54HMBLGPOCGUNQ6TYF6F",
 };
 
 export async function POST(request: NextRequest) {
@@ -65,12 +66,13 @@ export async function POST(request: NextRequest) {
     credentials.signature(xdr.ScVal.scvVec([sigInnerMap]));
 
     // Reconstruct simulation result for assembly
+    // NOTE: result.auth must be XDR objects, not base64 strings
     const simResultForAssembly = {
       transactionData: xdr.SorobanTransactionData.fromXDR(simResultData.transactionData, "base64"),
       minResourceFee: simResultData.minResourceFee,
       latestLedger: simResultData.latestLedger,
       result: {
-        auth: [authEntry.toXDR("base64")],
+        auth: [authEntry],  // Pass XDR object directly
       },
     } as unknown as rpc.Api.SimulateTransactionSuccessResponse;
 
