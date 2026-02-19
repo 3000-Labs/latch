@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import Link from "next/link";
+import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import bs58 from "bs58"; // Import base58 decoder
 
@@ -213,51 +213,6 @@ export default function DemoPage() {
     }
   }, [phantomPubkeyHex, smartAccountAddress]);
 
-  const testPhantomSign = useCallback(async () => {
-    try {
-      console.log("🧪 Testing Phantom signMessage DIRECTLY via window.solana...");
-
-      // Debug: Check what's available
-      console.log("window.phantom:", (window as any).phantom);
-      console.log("window.solana:", (window as any).solana);
-
-      // Access Phantom directly, bypass the SDK
-      const provider = (window as any).phantom?.solana;
-      console.log("provider:", provider);
-      console.log("provider.isPhantom:", provider?.isPhantom);
-      console.log("provider.isConnected:", provider?.isConnected);
-      console.log("provider.publicKey:", provider?.publicKey);
-
-      if (!provider?.isPhantom) {
-        throw new Error("Phantom wallet not found");
-      }
-
-      // Ensure connected
-      if (!provider.isConnected) {
-        console.log("Not connected, calling connect()...");
-        const result = await provider.connect();
-        console.log("Connect result:", result);
-      }
-
-      // Sign using the standard Solana wallet interface
-      console.log("Attempting to sign message...");
-      const message = new TextEncoder().encode("Hello World");
-      console.log("Message bytes:", message);
-
-      // Try without the display parameter
-      const result = await provider.signMessage(message);
-      console.log("signMessage result:", result);
-
-      console.log("✅ Direct Phantom sign SUCCESS!");
-      console.log("Signature:", result.signature);
-      console.log("Public key:", result.publicKey?.toString());
-      alert("✅ Direct signing works! Check console.");
-    } catch (err) {
-      console.error("❌ Direct sign FAILED:", err);
-      console.error("Error details:", { name: (err as any)?.name, message: (err as any)?.message, stack: (err as any)?.stack });
-      alert(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, []);
 
   const disconnect = useCallback(async () => {
     // SDK doesn't have a clear 'disconnect' method in the docs shown, 
@@ -292,29 +247,25 @@ export default function DemoPage() {
     }
   };
 
+  const COUNTER_ADDRESS = "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U";
+  const VERIFIER_ADDRESS = "CBNCF7QBTMIAEIZ3H6EN6JU5RDLBTFZZKGSWPAXW6PGPNY3HHIW5HKCH";
+
   return (
     <div className="min-h-svh bg-background">
       <div className="max-w-2xl mx-auto px-4 py-16">
-        {/* Back link */}
-        <Link
-          href="/"
-          className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-8"
-        >
-          &larr; Back to Home
-        </Link>
 
         {/* Header */}
         <div className="text-center mb-12">
-          <div className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold bg-primary text-primary-foreground mb-4">
-            SMART ACCOUNT DEMO
+          <div className="inline-flex items-center rounded-full border border-primary/30 px-3 py-1 text-xs font-mono text-primary mb-4 bg-primary/5">
+            LIVE ON TESTNET
           </div>
           <h1 className="text-4xl font-mono font-bold tracking-tighter mb-4">
-            Phantom → Smart Account
+            Phantom → Stellar Smart Account
           </h1>
           <p className="text-muted-foreground">
             Control a Soroban Smart Account using your Phantom wallet.
             <br />
-            <span className="text-xs">Ed25519 signatures verified on-chain.</span>
+            <span className="text-xs">Ed25519 signatures verified on-chain — no Stellar wallet needed.</span>
           </p>
         </div>
 
@@ -376,26 +327,78 @@ export default function DemoPage() {
             </div>
           )}
 
-          {/* Counter Display */}
-          {counterValue !== null && (
-            <div className="mb-4 p-4 bg-muted rounded-md text-center">
-              <p className="text-xs text-muted-foreground mb-1">Counter (modified via Smart Account)</p>
-              <p className="font-mono text-4xl font-bold">{counterValue}</p>
+          {/* On-Chain Contracts Info */}
+          {smartAccountAddress && (
+            <div className="mb-4 p-4 bg-muted/50 rounded-md space-y-2">
+              <p className="text-xs text-muted-foreground font-semibold mb-2">On-Chain Contracts (verify on Stellar Expert)</p>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Counter Contract</span>
+                <a
+                  href={`https://stellar.expert/explorer/testnet/contract/${COUNTER_ADDRESS}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-mono text-xs text-blue-600 hover:underline"
+                >
+                  {COUNTER_ADDRESS.slice(0, 8)}...{COUNTER_ADDRESS.slice(-6)}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Ed25519 Verifier</span>
+                <a
+                  href={`https://stellar.expert/explorer/testnet/contract/${VERIFIER_ADDRESS}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 font-mono text-xs text-blue-600 hover:underline"
+                >
+                  {VERIFIER_ADDRESS.slice(0, 8)}...{VERIFIER_ADDRESS.slice(-6)}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
             </div>
           )}
 
-          {/* Transaction Hash */}
-          {txHash && !txHash.startsWith("placeholder") && (
-            <div className="mb-4 p-4 bg-green-500/10 border border-green-500/20 rounded-md">
-              <p className="text-xs text-muted-foreground mb-1">Transaction Hash</p>
-              <a
-                href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-mono text-xs break-all text-green-600 hover:underline"
-              >
-                {txHash}
-              </a>
+          {/* Success Result */}
+          {state === "success" && txHash && (
+            <div className="mb-4 p-5 bg-green-500/10 border border-green-500/20 rounded-md space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">✅</span>
+                <span className="text-sm font-semibold text-green-700">Transaction Confirmed On-Chain</span>
+              </div>
+              
+              {counterValue !== null && (
+                <div className="text-center py-3">
+                  <p className="text-xs text-muted-foreground mb-1">Counter Value (modified via your Smart Account)</p>
+                  <p className="font-mono text-5xl font-bold text-foreground">{counterValue}</p>
+                </div>
+              )}
+
+              <div className="space-y-2 pt-2 border-t border-green-500/20">
+                <div>
+                  <p className="text-xs text-muted-foreground mb-0.5">Transaction Hash</p>
+                  <a
+                    href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-xs break-all text-green-700 hover:underline"
+                  >
+                    {txHash}
+                    <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                  </a>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-0.5">Authorized By</p>
+                  <p className="font-mono text-xs text-foreground/70">Phantom Ed25519 → On-chain Verifier → Smart Account</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Counter Display (non-success states) */}
+          {counterValue !== null && state !== "success" && (
+            <div className="mb-4 p-4 bg-muted rounded-md text-center">
+              <p className="text-xs text-muted-foreground mb-1">Counter Value</p>
+              <p className="font-mono text-4xl font-bold">{counterValue}</p>
             </div>
           )}
 
@@ -426,17 +429,9 @@ export default function DemoPage() {
                 <Button
                   onClick={runDemo}
                   size="lg"
-                  className="w-full font-mono"
+                  className="w-full font-mono bg-primary hover:bg-primary/90 text-primary-foreground"
                 >
-                  Execute via Smart Account
-                </Button>
-                <Button
-                  onClick={testPhantomSign}
-                  variant="secondary"
-                  size="lg"
-                  className="w-full font-mono"
-                >
-                  🧪 Test Phantom Signing
+                  {state === "success" ? "🔄 Increment Counter Again" : "⚡ Sign & Increment Counter"}
                 </Button>
                 <Button
                   onClick={disconnect}
