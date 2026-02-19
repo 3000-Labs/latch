@@ -244,21 +244,34 @@ export async function POST(request: NextRequest) {
         .setTimeout(300)
         .build();
 
-      initTx.sign(bundlerKeypair);
+      // Simulate initialization to get footprint
+      const initSimResult = await server.simulateTransaction(initTx);
 
-      const initResult = await server.sendTransaction(initTx);
+      if (rpc.Api.isSimulationError(initSimResult)) {
+        throw new Error(`Initialization simulation failed: ${initSimResult.error}`);
+      }
 
-      if (initResult.status !== "ERROR") {
-        // Wait for confirmation
-        for (let i = 0; i < 30; i++) {
-          await new Promise((r) => setTimeout(r, 1000));
-          const txResult = await server.getTransaction(initResult.hash);
-          if (txResult.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
-            if (txResult.status === rpc.Api.GetTransactionStatus.SUCCESS) {
-              console.log(`Initialized smart account with pubkey`);
-            }
-            break;
+      // Assemble with correct footprint
+      const assembledInitTx = rpc.assembleTransaction(initTx, initSimResult).build();
+      assembledInitTx.sign(bundlerKeypair);
+
+      const initResult = await server.sendTransaction(assembledInitTx);
+
+      if (initResult.status === "ERROR") {
+        throw new Error(`Initialization failed: ${initResult.errorResult?.toXDR("base64")}`);
+      }
+
+      // Wait for confirmation
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const txResult = await server.getTransaction(initResult.hash);
+        if (txResult.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
+          if (txResult.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+            console.log(`✅ Initialized smart account - context rule added for counter contract`);
+          } else {
+            console.error(`❌ Initialization transaction failed with status: ${txResult.status}`);
           }
+          break;
         }
       }
     } catch (initError: unknown) {
