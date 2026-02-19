@@ -88,8 +88,12 @@ stellar-accounts = { git = "https://github.com/OpenZeppelin/stellar-contracts", 
 
 ### Contract 1: Ed25519 Verifier
 
-This is the cryptographic oracle. It takes a payload, a public key, and a signature,
-and returns true/false. Stateless and immutable.
+This is the cryptographic oracle. It implements the OZ `Verifier` trait and validates
+prefixed Ed25519 signatures. It's stateless and immutable.
+
+**How it works:** Phantom can't sign raw 32-byte hashes (they look like Solana tx hashes).
+So we prefix with `"Stellar Smart Account Auth:\n"` + hex(hash). The verifier validates
+this format on-chain, then checks the Ed25519 signature.
 
 **contracts/ed25519-verifier/Cargo.toml**
 ```toml
@@ -103,6 +107,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+stellar-accounts = { workspace = true }
 
 [profile.release]
 opt-level = "z"
@@ -118,29 +123,66 @@ lto = true
 **contracts/ed25519-verifier/src/lib.rs**
 ```rust
 #![no_std]
-use soroban_sdk::{contract, contractimpl, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, xdr::FromXdr, Bytes, BytesN, Env};
+use stellar_accounts::verifiers::Verifier;
+
+const AUTH_PREFIX: &[u8] = b"Stellar Smart Account Auth:\n";
+const PREFIX_LEN: usize = 28;
+const PAYLOAD_LEN: usize = 32;
+const HEX_LEN: usize = 64;
+const TOTAL_LEN: usize = PREFIX_LEN + HEX_LEN; // 92 bytes
 
 #[contract]
 pub struct Ed25519Verifier;
 
+#[contracttype]
+pub struct Ed25519SigData {
+    pub prefixed_message: Bytes,
+    pub signature: BytesN<64>,
+}
+
 #[contractimpl]
-impl Ed25519Verifier {
-    /// Verifies an Ed25519 signature.
-    /// 
-    /// # Arguments
-    /// * `payload`    - The raw bytes that were signed (32-byte hash)
-    /// * `public_key` - 32-byte Ed25519 public key
-    /// * `signature`  - 64-byte Ed25519 signature
-    /// 
-    /// Returns true if valid. Panics if invalid (Soroban convention).
-    pub fn verify(
-        e: Env,
-        payload: Bytes,
-        public_key: BytesN<32>,
-        signature: BytesN<64>,
+impl Verifier for Ed25519Verifier {
+    type KeyData = Bytes;
+    type SigData = Bytes;
+
+    /// Verifies an Ed25519 signature over a prefixed message.
+    ///
+    /// sig_data contains { prefixed_message, signature } XDR-encoded.
+    /// prefixed_message = "Stellar Smart Account Auth:\n" + hex(signature_payload)
+    fn verify(
+        e: &Env,
+        signature_payload: Bytes,    // 32-byte auth payload hash
+        key_data: Self::KeyData,      // 32-byte public key
+        sig_data: Self::SigData,      // XDR-encoded Ed25519SigData
     ) -> bool {
-        e.crypto().ed25519_verify(&public_key, &payload, &signature);
+        let sig_struct: Ed25519SigData =
+            Ed25519SigData::from_xdr(e, &sig_data).expect("invalid sig_data");
+
+        let public_key: BytesN<32> = key_data.try_into().expect("key must be 32 bytes");
+
+        // Validate format: PREFIX + hex(payload)
+        let prefixed_msg_buf = sig_struct.prefixed_message.to_buffer::<TOTAL_LEN>();
+        let msg = prefixed_msg_buf.as_slice();
+
+        assert!(&msg[0..PREFIX_LEN] == AUTH_PREFIX, "missing prefix");
+
+        let payload_array = signature_payload.to_buffer::<PAYLOAD_LEN>();
+        let mut expected_hex = [0u8; HEX_LEN];
+        hex_encode(&mut expected_hex, payload_array.as_slice());
+        assert!(&msg[PREFIX_LEN..TOTAL_LEN] == &expected_hex[..], "hex mismatch");
+
+        // Verify Ed25519 signature over the full prefixed message
+        e.crypto().ed25519_verify(&public_key, &sig_struct.prefixed_message, &sig_struct.signature);
         true
+    }
+}
+
+fn hex_encode(dst: &mut [u8], src: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (i, &byte) in src.iter().enumerate() {
+        dst[i * 2] = HEX[(byte >> 4) as usize];
+        dst[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
     }
 }
 ```
@@ -497,17 +539,20 @@ stellar keys address sponsor  # add to .env as VITE_SPONSOR_KEY
 
 ## Part 4: Signature Generation (The Key Part)
 
-This is the trickiest piece. Here's exactly how the Phantom signature maps to what
-the Ed25519 verifier expects.
+This is the trickiest piece. The signature must match exactly what the on-chain
+verifier expects: a **prefixed message** containing the hex-encoded payload hash.
 
 ### The Flow
 
 ```
 1. Build Stellar transaction
 2. Compute the authorization payload hash (32 bytes)
-3. Ask Phantom to sign those 32 bytes → get 64-byte signature
-4. Package into Soroban auth entry with Signer::External format
-5. Submit
+3. Create prefixed message: "Stellar Smart Account Auth:\n" + hex(hash)
+4. Ask Phantom to sign the prefixed message → get 64-byte signature
+5. Package prefixed_message + signature into Ed25519SigData struct
+6. Set on auth entry with Signer::External format
+7. Enforcing Mode simulation validates everything
+8. Submit
 ```
 
 ### Frontend: app.js
@@ -614,41 +659,51 @@ async function simulateAndGetPayload(tx) {
 
 // ─── Step 4: Sign with Phantom ─────────────────────────────────────────────
 
-async function signWithPhantom(payloadHash, phantomPubkey) {
-  // Phantom's signMessage takes a Uint8Array and returns a signature Uint8Array
-  const { signature } = await window.solana.signMessage(
-    payloadHash,
-    'hex' // encoding hint — actual bytes are what matter
-  );
+async function signWithPhantom(payloadHashHex) {
+  // Prefix required: Phantom blocks raw 32-byte messages
+  const AUTH_PREFIX = "Stellar Smart Account Auth:\n";
+  const prefixedMessage = AUTH_PREFIX + payloadHashHex;
+  const messageBytes = new TextEncoder().encode(prefixedMessage);
+
+  // Phantom popup appears — user sees the prefixed message
+  const { signature } = await window.solana.signMessage(messageBytes);
   
-  // signature is 64 bytes — perfect for Ed25519Verifier
   console.log('Signature from Phantom:', Buffer.from(signature).toString('hex'));
-  return signature; // Uint8Array(64)
+  return { signature, prefixedMessage }; // 64-byte sig + the full message
 }
 
 // ─── Step 5: Build the auth entry ─────────────────────────────────────────
 
-function buildSignedAuthEntry(authEntry, phantomPubkeyBytes, signatureBytes) {
-  // Build Signer::External(verifier_address, public_key)
-  // This is the XDR encoding of Map<Signer, Bytes> 
-  // where Signer = External(Address, Bytes) and value = signature bytes
+function buildSignedAuthEntry(authEntry, phantomPubkeyBytes, signatureBytes, prefixedMessage) {
+  // Build Ed25519SigData struct: { prefixed_message, signature }
+  const sigDataMap = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('prefixed_message'),
+      val: xdr.ScVal.scvBytes(Buffer.from(prefixedMessage, 'utf-8')),
+    }),
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('signature'),
+      val: xdr.ScVal.scvBytes(Buffer.from(signatureBytes)),
+    }),
+  ]);
+  const sigDataBytes = xdr.ScVal.scvBytes(sigDataMap.toXDR());
 
+  // Build Signer::External(verifier_address, public_key)
   const signerKey = xdr.ScVal.scvVec([
     xdr.ScVal.scvSymbol('External'),
     new Address(VERIFIER_ADDRESS).toScVal(),
-    xdr.ScVal.scvBytes(Buffer.from(phantomPubkeyBytes)), // 32-byte pubkey
+    xdr.ScVal.scvBytes(Buffer.from(phantomPubkeyBytes)),
   ]);
 
   const sigInnerMap = xdr.ScVal.scvMap([
     new xdr.ScMapEntry({
       key: signerKey,
-      val: xdr.ScVal.scvBytes(Buffer.from(signatureBytes)), // 64-byte signature
+      val: sigDataBytes,  // XDR-encoded Ed25519SigData
     }),
   ]);
 
   // Set the signature on the auth entry
   authEntry.credentials().address().signature(xdr.ScVal.scvVec([sigInnerMap]));
-
   return authEntry;
 }
 
@@ -815,9 +870,10 @@ stellar account fund $SMART_ACCOUNT_ADDRESS --network testnet
 ```
 
 **"Phantom signMessage returns different bytes than expected"**
-Phantom prepends a message prefix for human-readable display. Use `signMessage` with
-raw bytes mode. If the prefix is an issue, sign the hex string of the hash and
-strip the prefix on the Stellar side. Test this early.
+Phantom signs over the exact bytes you pass to `signMessage()`. We pass a **prefixed
+message** (`"Stellar Smart Account Auth:\n" + hex(hash)`) — 92 bytes total. The
+on-chain verifier validates this exact format. Never pass raw 32-byte hashes to
+Phantom (they'll be blocked as potential Solana tx hash phishing).
 
 **"ExternalVerificationFailed"**
 The signature bytes don't match. Double-check:
