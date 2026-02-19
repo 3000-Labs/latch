@@ -25,8 +25,6 @@ impl Verifier for Ed25519Verifier {
     type SigData = Bytes;
 
     /// Verifies an Ed25519 signature over a prefixed message.
-    ///
-    /// Optimized version using direct array indexing (g2c pattern).
     fn verify(
         e: &Env,
         signature_payload: Bytes,
@@ -50,7 +48,7 @@ impl Verifier for Ed25519Verifier {
             panic!("prefixed_message has wrong length");
         }
 
-        // Convert to fixed-size buffer for fast validation (g2c pattern)
+        // Convert to fixed-size buffer for fast validation 
         let prefixed_msg_buf = sig_struct.prefixed_message.to_buffer::<TOTAL_LEN>();
         let prefixed_msg_slice = prefixed_msg_buf.as_slice();
 
@@ -65,7 +63,7 @@ impl Verifier for Ed25519Verifier {
         }
         let payload_array = signature_payload.to_buffer::<PAYLOAD_LEN>();
 
-        // Generate expected hex using direct array indexing (g2c pattern)
+        // Generate expected hex using direct array indexing
         let mut expected_hex = [0u8; HEX_LEN];
         hex_encode(&mut expected_hex, payload_array.as_slice());
 
@@ -82,7 +80,7 @@ impl Verifier for Ed25519Verifier {
     }
 }
 
-/// Fast hex encoding using direct array indexing (g2c pattern).
+/// Fast hex encoding using direct array indexing.
 /// Each input byte becomes two hex characters (0-9, a-f).
 fn hex_encode(dst: &mut [u8], src: &[u8]) {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";

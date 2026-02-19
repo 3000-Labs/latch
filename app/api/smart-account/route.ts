@@ -1,21 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
 import * as crypto from "crypto";
-import * as StellarSdk from "@stellar/stellar-sdk";
+import {
+  StrKey,
+  Keypair,
+  TransactionBuilder,
+  Networks,
+  Operation,
+  xdr,
+  rpc,
+  Contract,
+  Address,
+} from "@stellar/stellar-sdk";
 
-const execAsync = promisify(exec);
-const { StrKey } = StellarSdk;
+// Load configuration from environment variables
+const TESTNET_CONFIG = {
+  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+  networkPassphrase: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || Networks.TESTNET,
+  verifierAddress: process.env.NEXT_PUBLIC_VERIFIER_ADDRESS!,
+  counterAddress: process.env.NEXT_PUBLIC_COUNTER_ADDRESS!,
+  smartAccountWasmHash: process.env.NEXT_PUBLIC_SMART_ACCOUNT_WASM_HASH!,
+  bundlerSecret: process.env.BUNDLER_SECRET!,
+};
 
-// Contract addresses on testnet
-// Ed25519 verifier that implements Verifier trait for smart account integration
-// V6: Optimized with direct array indexing (g2c pattern)
-const VERIFIER_ADDRESS = "CBNCF7QBTMIAEIZ3H6EN6JU5RDLBTFZZKGSWPAXW6PGPNY3HHIW5HKCH";
-const COUNTER_ADDRESS = "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U";
-const SMART_ACCOUNT_WASM_HASH = "cf67f31cbff555b5a6c1fb3ab4411b9cdf34e96d4d2cf52dbec5d1f13fc6db40";
-
-const DEPLOYER_KEY = "franky";
-const NETWORK = "testnet";
+// Validate required environment variables
+if (!TESTNET_CONFIG.bundlerSecret) {
+  throw new Error("BUNDLER_SECRET environment variable is required");
+}
+if (!TESTNET_CONFIG.verifierAddress || !TESTNET_CONFIG.counterAddress || !TESTNET_CONFIG.smartAccountWasmHash) {
+  throw new Error("Missing required contract addresses in environment variables");
+}
 
 // Simple in-memory cache to track deployed accounts
 // In production, use a database
@@ -91,73 +104,163 @@ export async function POST(request: NextRequest) {
     await fundAccountIfNeeded(userGAddress);
 
     // Generate deterministic salt from pubkey + version
-    // Version 6: Optimized with direct array indexing (g2c pattern)
     const SMART_ACCOUNT_VERSION = "v6";
-    const salt = crypto.createHash("sha256").update(publicKeyHex + SMART_ACCOUNT_VERSION).digest("hex");
+    const saltHex = crypto.createHash("sha256").update(publicKeyHex + SMART_ACCOUNT_VERSION).digest("hex");
+    const salt = Buffer.from(saltHex, "hex");
 
     console.log(`Deploying smart account for pubkey: ${publicKeyHex}`);
-    console.log(`Using salt: ${salt}`);
+    console.log(`Using salt: ${saltHex}`);
 
-    // Deploy smart account with deterministic address
-    const deployCmd = `stellar contract deploy \
-      --wasm-hash ${SMART_ACCOUNT_WASM_HASH} \
-      --source ${DEPLOYER_KEY} \
-      --network ${NETWORK} \
-      --salt ${salt}`;
+    // Initialize Stellar SDK
+    const server = new rpc.Server(TESTNET_CONFIG.rpcUrl);
+    const bundlerKeypair = Keypair.fromSecret(TESTNET_CONFIG.bundlerSecret);
 
     let smartAccountAddress: string;
 
     try {
-      const { stdout } = await execAsync(deployCmd, {
-        env: { ...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + process.env.PATH },
-      });
-      smartAccountAddress = stdout.trim();
-      console.log(`Deployed smart account: ${smartAccountAddress}`);
-    } catch (deployError: unknown) {
-      // If already deployed with this salt, get the address using stellar contract id
-      const errorMessage = deployError instanceof Error ? deployError.message : String(deployError);
-      if (errorMessage.includes("contract already exists")) {
-        // Use stellar CLI to get the predicted address for this salt
-        const idCmd = `stellar contract id wasm \
-          --source-account ${DEPLOYER_KEY} \
-          --network ${NETWORK} \
-          --salt ${salt}`;
+      // Get bundler account
+      const bundlerAccount = await server.getAccount(bundlerKeypair.publicKey());
 
-        try {
-          const { stdout: idOutput } = await execAsync(idCmd, {
-            env: { ...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + process.env.PATH },
-          });
-          smartAccountAddress = idOutput.trim();
-          console.log(`Smart account already exists: ${smartAccountAddress}`);
-        } catch {
-          // Fallback: try to extract from error message
-          const match = errorMessage.match(/C[A-Z2-7]{55}/);
-          if (match) {
-            smartAccountAddress = match[0];
-          } else {
-            throw deployError;
-          }
+      // Build deployment transaction
+      const deployTx = new TransactionBuilder(bundlerAccount, {
+        fee: "1000000",
+        networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+      })
+        .addOperation(
+          Operation.createCustomContract({
+            address: new Address(bundlerKeypair.publicKey()),
+            wasmHash: Buffer.from(TESTNET_CONFIG.smartAccountWasmHash, "hex"),
+            salt: salt,
+          })
+        )
+        .setTimeout(300)
+        .build();
+
+      // Simulate to get footprint and resource fees
+      const simResult = await server.simulateTransaction(deployTx);
+
+      if (rpc.Api.isSimulationError(simResult)) {
+        throw new Error(`Deployment simulation failed: ${simResult.error}`);
+      }
+
+      // Assemble transaction with correct footprint
+      const assembledTx = rpc.assembleTransaction(deployTx, simResult).build();
+      assembledTx.sign(bundlerKeypair);
+
+      // Submit deployment transaction
+      const deployResult = await server.sendTransaction(assembledTx);
+
+      if (deployResult.status === "ERROR") {
+        throw new Error(`Deployment failed: ${deployResult.errorResult?.toXDR("base64")}`);
+      }
+
+      // Wait for transaction confirmation
+      let deployTxResult: rpc.Api.GetTransactionResponse | undefined;
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        deployTxResult = await server.getTransaction(deployResult.hash);
+        if (deployTxResult.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
+          break;
         }
+      }
+
+      if (!deployTxResult) {
+        throw new Error("Transaction not found after polling");
+      }
+
+      if (deployTxResult.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+        // Extract contract address from transaction result
+        const result = deployTxResult as rpc.Api.GetSuccessfulTransactionResponse;
+        const returnValue = result.returnValue;
+        if (returnValue) {
+          smartAccountAddress = Address.fromScAddress(returnValue as any).toString();
+          console.log(`Deployed smart account: ${smartAccountAddress}`);
+        } else {
+          throw new Error("No return value from deployment transaction");
+        }
+      } else if (deployTxResult.status === rpc.Api.GetTransactionStatus.FAILED) {
+        // Contract might already exist - compute the expected address
+        const contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+          new xdr.ContractIdPreimageFromAddress({
+            address: Address.fromString(bundlerKeypair.publicKey()).toScAddress(),
+            salt: salt,
+          })
+        );
+        const networkIdHash = crypto.createHash("sha256").update(TESTNET_CONFIG.networkPassphrase, "utf8").digest();
+        const hashIdPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+          new xdr.HashIdPreimageContractId({
+            networkId: networkIdHash,
+            contractIdPreimage: contractIdPreimage,
+          })
+        );
+        const contractIdHash = crypto.createHash("sha256").update(hashIdPreimage.toXDR()).digest();
+        smartAccountAddress = StrKey.encodeContract(contractIdHash);
+        console.log(`Smart account already exists: ${smartAccountAddress}`);
+      } else {
+        throw new Error(`Deployment transaction status: ${deployTxResult.status}`);
+      }
+    } catch (deployError: unknown) {
+      const errorMessage = deployError instanceof Error ? deployError.message : String(deployError);
+      // If contract already exists, compute the deterministic address
+      if (errorMessage.includes("already exists") || errorMessage.includes("ExistingValue")) {
+        const contractIdPreimage = xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+          new xdr.ContractIdPreimageFromAddress({
+            address: Address.fromString(bundlerKeypair.publicKey()).toScAddress(),
+            salt: salt,
+          })
+        );
+        const networkIdHash = crypto.createHash("sha256").update(TESTNET_CONFIG.networkPassphrase, "utf8").digest();
+        const hashIdPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+          new xdr.HashIdPreimageContractId({
+            networkId: networkIdHash,
+            contractIdPreimage: contractIdPreimage,
+          })
+        );
+        const contractIdHash = crypto.createHash("sha256").update(hashIdPreimage.toXDR()).digest();
+        smartAccountAddress = StrKey.encodeContract(contractIdHash);
+        console.log(`Smart account already exists (computed address): ${smartAccountAddress}`);
       } else {
         throw deployError;
       }
     }
 
-    // Initialize the smart account with the Phantom pubkey
-    const initCmd = `stellar contract invoke \
-      --id ${smartAccountAddress} \
-      --source ${DEPLOYER_KEY} \
-      --network ${NETWORK} \
-      -- initialize \
-      --verifier ${VERIFIER_ADDRESS} \
-      --public_key ${publicKeyHex} \
-      --counter ${COUNTER_ADDRESS}`;
-
+    // Initialize the smart account with the Phantom pubkey using SDK
     try {
-      await execAsync(initCmd, {
-        env: { ...process.env, PATH: "/opt/homebrew/bin:/usr/local/bin:" + process.env.PATH },
-      });
-      console.log(`Initialized smart account with pubkey`);
+      const contract = new Contract(smartAccountAddress);
+      const bundlerAccount = await server.getAccount(bundlerKeypair.publicKey());
+
+      const initTx = new TransactionBuilder(bundlerAccount, {
+        fee: "1000000",
+        networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+      })
+        .addOperation(
+          contract.call(
+            "initialize",
+            new Address(TESTNET_CONFIG.verifierAddress).toScVal(),
+            xdr.ScVal.scvBytes(Buffer.from(publicKeyHex, "hex")),
+            new Address(TESTNET_CONFIG.counterAddress).toScVal()
+          )
+        )
+        .setTimeout(300)
+        .build();
+
+      initTx.sign(bundlerKeypair);
+
+      const initResult = await server.sendTransaction(initTx);
+
+      if (initResult.status !== "ERROR") {
+        // Wait for confirmation
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const txResult = await server.getTransaction(initResult.hash);
+          if (txResult.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
+            if (txResult.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+              console.log(`Initialized smart account with pubkey`);
+            }
+            break;
+          }
+        }
+      }
     } catch (initError: unknown) {
       const errorMessage = initError instanceof Error ? initError.message : String(initError);
       // Error #3001 = DuplicateContextRule (already initialized)
@@ -176,8 +279,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       smartAccountAddress,
       gAddress: userGAddress,
-      verifierAddress: VERIFIER_ADDRESS,
-      counterAddress: COUNTER_ADDRESS,
+      verifierAddress: TESTNET_CONFIG.verifierAddress,
+      counterAddress: TESTNET_CONFIG.counterAddress,
       alreadyDeployed: false,
     });
   } catch (error) {
@@ -198,8 +301,8 @@ export async function POST(request: NextRequest) {
 
 export async function GET() {
   return NextResponse.json({
-    verifierAddress: VERIFIER_ADDRESS,
-    counterAddress: COUNTER_ADDRESS,
-    network: NETWORK,
+    verifierAddress: TESTNET_CONFIG.verifierAddress,
+    counterAddress: TESTNET_CONFIG.counterAddress,
+    network: "testnet",
   });
 }

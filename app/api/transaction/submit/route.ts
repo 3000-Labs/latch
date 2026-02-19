@@ -12,14 +12,16 @@ import {
 } from "@stellar/stellar-sdk";
 
 const TESTNET_CONFIG = {
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  networkPassphrase: Networks.TESTNET,
-  // Ed25519 verifier contract (implements Verifier trait)
-  // V6: Optimized with direct array indexing (g2c pattern)
-  verifierAddress: "CBNCF7QBTMIAEIZ3H6EN6JU5RDLBTFZZKGSWPAXW6PGPNY3HHIW5HKCH",
-  // Bundler keypair (pays fees, signs envelope)
-  bundlerSecret: "SDGWLYMZGV43RKDEQXGD4FKRP3L7S6BC5QQQDS54MJ6RORZSJE64V2PF",
+  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+  networkPassphrase: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || Networks.TESTNET,
+  verifierAddress: process.env.NEXT_PUBLIC_VERIFIER_ADDRESS!,
+  bundlerSecret: process.env.BUNDLER_SECRET!,
 };
+
+// Validate required environment variables
+if (!TESTNET_CONFIG.bundlerSecret || !TESTNET_CONFIG.verifierAddress) {
+  throw new Error("Missing required environment variables (BUNDLER_SECRET, NEXT_PUBLIC_VERIFIER_ADDRESS)");
+}
 
 export async function POST(request: NextRequest) {
   try {

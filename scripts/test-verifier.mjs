@@ -177,7 +177,6 @@ async function testVerifier() {
     if (verified) {
       console.log("\n   ✅ VERIFICATION SUCCEEDED");
       console.log("   ✅ Verifier contract is working correctly!");
-      console.log("   ✅ g2c pattern optimizations are functional");
     } else {
       console.log("\n   ❌ VERIFICATION FAILED");
       console.log("   ❌ Verifier returned false");

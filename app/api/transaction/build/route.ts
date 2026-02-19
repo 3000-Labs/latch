@@ -7,15 +7,24 @@ import {
   xdr,
   hash,
   rpc,
+  Keypair,
 } from "@stellar/stellar-sdk";
 
 const TESTNET_CONFIG = {
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  networkPassphrase: Networks.TESTNET,
-  counterAddress: "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U",
-  // Bundler account that pays fees and signs the envelope
-  bundlerAddress: "GBL4FMN3MPLPA2IS7T2K5VAGGVT4WJWJ24YXYFAHIFOGGCVEM6WVVAQA",
+  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+  networkPassphrase: process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || Networks.TESTNET,
+  counterAddress: process.env.NEXT_PUBLIC_COUNTER_ADDRESS!,
+  bundlerSecret: process.env.BUNDLER_SECRET!,
 };
+
+// Validate required environment variables
+if (!TESTNET_CONFIG.bundlerSecret || !TESTNET_CONFIG.counterAddress) {
+  throw new Error("Missing required environment variables (BUNDLER_SECRET, NEXT_PUBLIC_COUNTER_ADDRESS)");
+}
+
+// Derive bundler address from secret
+const bundlerKeypair = Keypair.fromSecret(TESTNET_CONFIG.bundlerSecret);
+const bundlerAddress = bundlerKeypair.publicKey();
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,7 +39,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Build the transaction using bundler account as source (pays fees, signs envelope)
-    const account = await server.getAccount(TESTNET_CONFIG.bundlerAddress);
+    const account = await server.getAccount(bundlerAddress);
     const contract = new Contract(TESTNET_CONFIG.counterAddress);
 
     const tx = new TransactionBuilder(account, {
