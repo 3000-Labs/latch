@@ -8,8 +8,9 @@ const execAsync = promisify(exec);
 const { StrKey } = StellarSdk;
 
 // Contract addresses on testnet
-// New verifier that handles Phantom's prefixed message format
-const VERIFIER_ADDRESS = "CBOOH2MLTLRRONXKLX755IR6VU4EAXQEQDIK54HMBLGPOCGUNQ6TYF6F";
+// Ed25519 verifier that implements Verifier trait for smart account integration
+// V6: Optimized with direct array indexing (g2c pattern)
+const VERIFIER_ADDRESS = "CBNCF7QBTMIAEIZ3H6EN6JU5RDLBTFZZKGSWPAXW6PGPNY3HHIW5HKCH";
 const COUNTER_ADDRESS = "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U";
 const SMART_ACCOUNT_WASM_HASH = "cf67f31cbff555b5a6c1fb3ab4411b9cdf34e96d4d2cf52dbec5d1f13fc6db40";
 
@@ -90,8 +91,8 @@ export async function POST(request: NextRequest) {
     await fundAccountIfNeeded(userGAddress);
 
     // Generate deterministic salt from pubkey + version
-    // Version 2: Uses new verifier that handles Phantom's prefixed message format
-    const SMART_ACCOUNT_VERSION = "v2";
+    // Version 6: Optimized with direct array indexing (g2c pattern)
+    const SMART_ACCOUNT_VERSION = "v6";
     const salt = crypto.createHash("sha256").update(publicKeyHex + SMART_ACCOUNT_VERSION).digest("hex");
 
     console.log(`Deploying smart account for pubkey: ${publicKeyHex}`);
@@ -159,9 +160,12 @@ export async function POST(request: NextRequest) {
       console.log(`Initialized smart account with pubkey`);
     } catch (initError: unknown) {
       const errorMessage = initError instanceof Error ? initError.message : String(initError);
-      // If already initialized, that's fine
-      if (!errorMessage.includes("already") && !errorMessage.includes("initialized")) {
-        console.error("Init error:", errorMessage);
+      // Error #3001 = DuplicateContextRule (already initialized)
+      // Error #3000 = ContextRuleNotFound (shouldn't happen but harmless)
+      if (errorMessage.includes("#3001") || errorMessage.includes("already") || errorMessage.includes("ExistingValue")) {
+        console.log(`Smart account already initialized (context rule exists)`);
+      } else {
+        console.error("Init error:", errorMessage.substring(0, 200));
         // Continue anyway - might already be initialized
       }
     }

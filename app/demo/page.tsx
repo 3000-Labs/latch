@@ -115,7 +115,7 @@ export default function DemoPage() {
 
   // Execute transaction via smart account
   const runDemo = useCallback(async () => {
-    if (!phantomPubkeyHex || !smartAccountAddress || !gAddress) {
+    if (!phantomPubkeyHex || !smartAccountAddress) {
       setError("Connect Phantom first");
       return;
     }
@@ -129,7 +129,7 @@ export default function DemoPage() {
       const buildResponse = await fetch("/api/transaction/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ smartAccountAddress, gAddress }),
+        body: JSON.stringify({ smartAccountAddress }),
       });
 
       if (!buildResponse.ok) {
@@ -137,16 +137,15 @@ export default function DemoPage() {
         throw new Error(errorData.error || "Failed to build transaction");
       }
 
-      const { txXdr, authEntryXdr, simulationResultXdr, authPayloadHash, txHash: transactionHash, validUntilLedger } =
+      const { txXdr, authEntryXdr, authPayloadHash, validUntilLedger } =
         await buildResponse.json();
 
       console.log("Auth payload hash:", authPayloadHash);
-      console.log("Transaction hash:", transactionHash);
       console.log("Valid until ledger:", validUntilLedger);
 
-      // Step 2: Sign BOTH hashes with Phantom (using direct provider)
+      // Step 2: Sign auth payload with Phantom (using direct provider)
       setState("signing");
-      console.log("Requesting Phantom signatures...");
+      console.log("Requesting Phantom signature for smart account authorization...");
 
       const provider = getPhantomProvider();
       if (!provider) {
@@ -157,27 +156,21 @@ export default function DemoPage() {
       // We need to prefix with human-readable text
       // NOTE: The on-chain smart account verifier MUST expect this same format
       const AUTH_PREFIX = "Stellar Smart Account Auth:\n";
-      const TX_PREFIX = "Stellar Transaction:\n";
 
       // Sign the auth payload hash (for smart account authorization)
       console.log("Signing auth payload...");
-      const authMessage = new TextEncoder().encode(AUTH_PREFIX + authPayloadHash);
-      const authSignResult = await provider.signMessage(authMessage, "utf8");
+      const prefixedMessage = AUTH_PREFIX + authPayloadHash;
+      const authMessage = new TextEncoder().encode(prefixedMessage);
+      const authSignResult = await provider.signMessage(authMessage);
 
       console.log("Auth signature result:", authSignResult);
       const authSignatureHex = Buffer.from(authSignResult.signature).toString("hex");
       console.log("Auth signature hex:", authSignatureHex);
 
-      // Sign the transaction hash (for envelope signature)
-      console.log("Signing transaction envelope...");
-      const txMessage = new TextEncoder().encode(TX_PREFIX + transactionHash);
-      const envelopeSignResult = await provider.signMessage(txMessage, "utf8");
+      console.log("Note: Signature is over prefixed message, not raw hash");
+      console.log("Note: Bundler will sign transaction envelope server-side");
+      console.log("Note: Prefixed message is passed to verifier for validation (no on-chain hex conversion)");
 
-      const envelopeSignatureHex = Buffer.from(envelopeSignResult.signature).toString("hex");
-      console.log("Envelope signature hex:", envelopeSignatureHex);
-
-      console.log("Note: Signatures are over prefixed messages, not raw hashes");
-      
       // Step 3: Submit the transaction via API
       setState("submitting");
       console.log("Submitting transaction...");
@@ -188,9 +181,8 @@ export default function DemoPage() {
         body: JSON.stringify({
           txXdr,
           authEntryXdr,
-          simulationResultXdr,
           authSignatureHex,
-          envelopeSignatureHex,
+          prefixedMessage,  // Pass the full message that was signed
           publicKeyHex: phantomPubkeyHex,
         }),
       });
@@ -219,7 +211,7 @@ export default function DemoPage() {
       setState("error");
       setError(err instanceof Error ? err.message : "Transaction failed");
     }
-  }, [phantomPubkeyHex, smartAccountAddress, gAddress]);
+  }, [phantomPubkeyHex, smartAccountAddress]);
 
   const testPhantomSign = useCallback(async () => {
     try {
@@ -252,7 +244,8 @@ export default function DemoPage() {
       const message = new TextEncoder().encode("Hello World");
       console.log("Message bytes:", message);
 
-      const result = await provider.signMessage(message, "utf8");
+      // Try without the display parameter
+      const result = await provider.signMessage(message);
       console.log("signMessage result:", result);
 
       console.log("✅ Direct Phantom sign SUCCESS!");

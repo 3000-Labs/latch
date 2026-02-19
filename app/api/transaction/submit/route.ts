@@ -6,13 +6,19 @@ import {
   xdr,
   rpc,
   Transaction,
+  Operation,
+  Keypair,
+  Account,
 } from "@stellar/stellar-sdk";
 
 const TESTNET_CONFIG = {
   rpcUrl: "https://soroban-testnet.stellar.org",
   networkPassphrase: Networks.TESTNET,
-  // New verifier that handles Phantom's prefixed message format
-  verifierAddress: "CBOOH2MLTLRRONXKLX755IR6VU4EAXQEQDIK54HMBLGPOCGUNQ6TYF6F",
+  // Ed25519 verifier contract (implements Verifier trait)
+  // V6: Optimized with direct array indexing (g2c pattern)
+  verifierAddress: "CBNCF7QBTMIAEIZ3H6EN6JU5RDLBTFZZKGSWPAXW6PGPNY3HHIW5HKCH",
+  // Bundler keypair (pays fees, signs envelope)
+  bundlerSecret: "SDGWLYMZGV43RKDEQXGD4FKRP3L7S6BC5QQQDS54MJ6RORZSJE64V2PF",
 };
 
 export async function POST(request: NextRequest) {
@@ -21,13 +27,12 @@ export async function POST(request: NextRequest) {
     const {
       txXdr,
       authEntryXdr,
-      simulationResultXdr,
-      authSignatureHex,      // Signature for smart account authorization
-      envelopeSignatureHex,  // Signature for transaction envelope
+      authSignatureHex,  // Phantom signature for smart account authorization
+      prefixedMessage,    // The full message that was signed (PREFIX + hex(payload))
       publicKeyHex,
     } = await request.json();
 
-    if (!txXdr || !authEntryXdr || !simulationResultXdr || !authSignatureHex || !envelopeSignatureHex || !publicKeyHex) {
+    if (!txXdr || !authEntryXdr || !authSignatureHex || !prefixedMessage || !publicKeyHex) {
       return NextResponse.json(
         { error: "Missing required parameters" },
         { status: 400 }
@@ -41,23 +46,45 @@ export async function POST(request: NextRequest) {
     ) as Transaction;
 
     const authEntry = xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, "base64");
-    const simResultData = JSON.parse(simulationResultXdr);
+
+    // Build Ed25519SigData struct (prefixed_message + signature) and encode to XDR
+    // This is what the verifier expects as sig_data
+    const prefixedMessageBytes = Buffer.from(prefixedMessage, "utf-8");
+    const authSignatureBytes = Buffer.from(authSignatureHex, "hex");
+
+    // Create Ed25519SigData ScMap: { prefixed_message: Bytes, signature: BytesN<64> }
+    // Note: Map keys must be sorted lexicographically
+    const sigDataMap = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("prefixed_message"),
+        val: xdr.ScVal.scvBytes(prefixedMessageBytes),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("signature"),
+        val: xdr.ScVal.scvBytes(authSignatureBytes),
+      }),
+    ]);
+
+    // Encode the ScMap to XDR bytes (like Rust's to_xdr() does)
+    const sigDataXdr = sigDataMap.toXDR();
+
+    // Wrap the XDR bytes in ScBytes (this is what the verifier receives as sig_data)
+    const sigDataBytes = xdr.ScVal.scvBytes(sigDataXdr);
 
     // Build the signature map for smart account auth
     // Format: Map<Signer, Signature> where Signer = External(verifier_address, public_key_bytes)
     const phantomPubkeyBytes = Buffer.from(publicKeyHex, "hex");
-    const authSignatureBytes = Buffer.from(authSignatureHex, "hex");
 
     const signerKey = xdr.ScVal.scvVec([
       xdr.ScVal.scvSymbol("External"),
-      new Address(TESTNET_CONFIG.verifierAddress).toScVal(),
+      Address.fromString(TESTNET_CONFIG.verifierAddress).toScVal(),
       xdr.ScVal.scvBytes(phantomPubkeyBytes),
     ]);
 
     const sigInnerMap = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({
         key: signerKey,
-        val: xdr.ScVal.scvBytes(authSignatureBytes),
+        val: sigDataBytes,  // XDR-encoded Ed25519SigData struct
       }),
     ]);
 
@@ -65,41 +92,40 @@ export async function POST(request: NextRequest) {
     const credentials = authEntry.credentials().address();
     credentials.signature(xdr.ScVal.scvVec([sigInnerMap]));
 
-    // Reconstruct simulation result for assembly
-    // NOTE: result.auth must be XDR objects, not base64 strings
-    const simResultForAssembly = {
-      transactionData: xdr.SorobanTransactionData.fromXDR(simResultData.transactionData, "base64"),
-      minResourceFee: simResultData.minResourceFee,
-      latestLedger: simResultData.latestLedger,
-      result: {
-        auth: [authEntry],  // Pass XDR object directly
-      },
-    } as unknown as rpc.Api.SimulateTransactionSuccessResponse;
+    // Build new transaction with signed auth entry
+    const origOp = tx.operations[0] as Operation.InvokeHostFunction;
+    const sourceAccount = new Account(tx.source, (BigInt(tx.sequence) - 1n).toString());
 
-    // Assemble the transaction
-    const assembledTx = rpc.assembleTransaction(tx, simResultForAssembly).build();
+    const txWithAuth = new TransactionBuilder(sourceAccount, {
+      fee: "100000",
+      networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+    })
+      .addOperation(
+        Operation.invokeHostFunction({
+          func: origOp.func,
+          auth: [authEntry],
+        })
+      )
+      .setTimeout(300)
+      .build();
 
-    // Replace auth with our signed version
-    const sorobanData = assembledTx.operations[0] as unknown as {
-      auth?: xdr.SorobanAuthorizationEntry[];
-    };
-    if (sorobanData.auth) {
-      sorobanData.auth[0] = authEntry;
+    // Enforcing Mode simulation: validates the signature and gets accurate
+    // footprint + resource fees. This replaces all manual footprint patching,
+    // instruction padding, and fee calculation.
+    const enforcingSim = await server.simulateTransaction(txWithAuth);
+
+    if (rpc.Api.isSimulationError(enforcingSim)) {
+      throw new Error(`Auth validation failed: ${enforcingSim.error}`);
     }
 
-    // Add the user's envelope signature
-    // The signature was created by Phantom signing the transaction hash
-    const envelopeSignatureBytes = Buffer.from(envelopeSignatureHex, "hex");
+    // assembleTransaction applies correct footprint + resource fees automatically
+    const assembledTx = rpc.assembleTransaction(txWithAuth, enforcingSim).build();
 
-    // Create signature hint from the last 4 bytes of the public key
-    const hint = phantomPubkeyBytes.slice(-4);
-    const decoratedSignature = new xdr.DecoratedSignature({
-      hint: xdr.SignatureHint.fromXDR(hint),
-      signature: envelopeSignatureBytes,
-    });
+    console.log(`Enforcing Mode: fee=${assembledTx.fee}, minResourceFee=${enforcingSim.minResourceFee}`);
 
-    // Add the signature to the transaction
-    assembledTx.signatures.push(decoratedSignature);
+    // Sign the envelope with bundler keypair (server-side)
+    const bundlerKeypair = Keypair.fromSecret(TESTNET_CONFIG.bundlerSecret);
+    assembledTx.sign(bundlerKeypair);
 
     // Submit
     const sendResult = await server.sendTransaction(assembledTx);
@@ -112,6 +138,9 @@ export async function POST(request: NextRequest) {
 
     // Poll for result
     const txHash = sendResult.hash;
+    console.log(`\n✅ Transaction submitted: ${txHash}`);
+    console.log(`   View on explorer: https://stellar.expert/explorer/testnet/tx/${txHash}`);
+
     let txResult: rpc.Api.GetTransactionResponse;
 
     for (let i = 0; i < 30; i++) {
@@ -130,7 +159,75 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    throw new Error(`Transaction failed: ${txResult!.status}`);
+    // Get detailed error information
+    let errorDetail = txResult!.status;
+    if (txResult!.status === rpc.Api.GetTransactionStatus.FAILED) {
+      const result = txResult as rpc.Api.GetFailedTransactionResponse;
+
+      // Log diagnostic events to understand what failed
+      if ('diagnosticEventsXdr' in result && Array.isArray((result as any).diagnosticEventsXdr)) {
+        console.error("\n=== Diagnostic Events ===");
+        (result as any).diagnosticEventsXdr.forEach((diagnosticEvent: any, i: number) => {
+          try {
+            // diagnosticEvent is already a parsed XDR object
+            const event = diagnosticEvent._attributes.event;
+            const eventType = event._attributes.type?._switch?.name || 'unknown';
+            console.error(`\nEvent ${i} (${eventType}):`);
+
+            if (eventType === 'contract') {
+              const body = event._attributes.body?._value;
+              if (body) {
+                const topics = body._attributes?.topics?._value || [];
+                const data = body._attributes?.data;
+                console.error(`  Topics:`, topics.map((t: any) => {
+                  try {
+                    const val = t._switch?.name || JSON.stringify(t);
+                    return val;
+                  } catch {
+                    return '[complex]';
+                  }
+                }));
+                console.error(`  Data:`, data);
+              }
+            }
+          } catch (e) {
+            console.error(`Event ${i}: Error extracting -`, e);
+          }
+        });
+      }
+
+      // resultXdr is already an XDR object, not a string
+      const parsedResult = result.resultXdr as xdr.TransactionResult;
+      const resultCode = parsedResult.result().switch().name;
+      const opResults = parsedResult.result().results();
+
+      console.error("Transaction result code:", resultCode);
+
+      if (opResults && opResults.length > 0) {
+        const opResult = opResults[0];
+        const opResultCode = opResult.switch().name;
+        console.error("Operation result code:", opResultCode);
+
+        if (opResultCode === "opInner") {
+          const innerResult = opResult.value();
+          const invokeResult = innerResult.switch().name;
+          console.error("Invoke result:", invokeResult);
+
+          // If it's invokeHostFunctionTrapped, get the diagnostic events
+          if (invokeResult === "invokeHostFunctionTrapped") {
+            errorDetail = `${result.status} - Contract execution failed (trapped)`;
+          } else {
+            errorDetail = `${result.status} - ${resultCode} - ${opResultCode} - ${invokeResult}`;
+          }
+        } else {
+          errorDetail = `${result.status} - ${resultCode} - ${opResultCode}`;
+        }
+      } else {
+        errorDetail = `${result.status} - ${resultCode}`;
+      }
+    }
+
+    throw new Error(`Transaction failed: ${errorDetail}`);
   } catch (error) {
     console.error("Error submitting transaction:", error);
     return NextResponse.json(

@@ -13,12 +13,14 @@ const TESTNET_CONFIG = {
   rpcUrl: "https://soroban-testnet.stellar.org",
   networkPassphrase: Networks.TESTNET,
   counterAddress: "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U",
+  // Bundler account that pays fees and signs the envelope
+  bundlerAddress: "GBL4FMN3MPLPA2IS7T2K5VAGGVT4WJWJ24YXYFAHIFOGGCVEM6WVVAQA",
 };
 
 export async function POST(request: NextRequest) {
   try {
     const server = new rpc.Server(TESTNET_CONFIG.rpcUrl);
-    const { smartAccountAddress, gAddress } = await request.json();
+    const { smartAccountAddress } = await request.json();
 
     if (!smartAccountAddress || typeof smartAccountAddress !== "string") {
       return NextResponse.json(
@@ -27,15 +29,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!gAddress || typeof gAddress !== "string") {
-      return NextResponse.json(
-        { error: "Missing gAddress (user's Stellar account)" },
-        { status: 400 }
-      );
-    }
-
-    // Build the transaction using user's G-address as source
-    const account = await server.getAccount(gAddress);
+    // Build the transaction using bundler account as source (pays fees, signs envelope)
+    const account = await server.getAccount(TESTNET_CONFIG.bundlerAddress);
     const contract = new Contract(TESTNET_CONFIG.counterAddress);
 
     const tx = new TransactionBuilder(account, {
@@ -90,10 +85,6 @@ export async function POST(request: NextRequest) {
 
     const payloadHash = hash(preimage.toXDR());
 
-    // Compute the transaction hash that needs to be signed for the envelope
-    // This is hash(networkIdHash + ENVELOPE_TYPE_TX + tx)
-    const txHash = tx.hash();
-
     // Handle transactionData - may be string, XDR object, or SorobanDataBuilder
     let transactionDataXdr: string | undefined;
     const txData = simResult.transactionData as unknown;
@@ -118,7 +109,6 @@ export async function POST(request: NextRequest) {
         latestLedger: simResult.latestLedger,
       }),
       authPayloadHash: payloadHash.toString("hex"),
-      txHash: txHash.toString("hex"),
       validUntilLedger,
     });
   } catch (error) {
