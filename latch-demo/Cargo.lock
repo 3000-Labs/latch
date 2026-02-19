@@ -563,6 +563,7 @@ dependencies = [
  "ed25519-dalek",
  "rand",
  "soroban-sdk",
+ "stellar-accounts",
 ]
 
 [[package]]

@@ -1,72 +1,98 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, xdr::FromXdr, Bytes, BytesN, Env};
+use stellar_accounts::verifiers::Verifier;
 
 /// The prefix that Phantom wallet prepends to the auth payload hash.
-/// This is needed because Phantom blocks signing raw 32-byte hashes
-/// (they look like Solana transaction hashes).
 const AUTH_PREFIX: &[u8] = b"Stellar Smart Account Auth:\n";
+const PREFIX_LEN: usize = 28; // "Stellar Smart Account Auth:\n" = 28 bytes
+const PAYLOAD_LEN: usize = 32;
+const HEX_LEN: usize = 64;
+const TOTAL_LEN: usize = PREFIX_LEN + HEX_LEN; // 92 bytes
 
 #[contract]
 pub struct Ed25519Verifier;
 
+/// Signature data containing both the prefixed message and signature.
+#[contracttype]
+pub struct Ed25519SigData {
+    pub prefixed_message: Bytes,
+    pub signature: BytesN<64>,
+}
+
 #[contractimpl]
-impl Ed25519Verifier {
+impl Verifier for Ed25519Verifier {
+    type KeyData = Bytes;
+    type SigData = Bytes;
+
     /// Verifies an Ed25519 signature over a prefixed message.
     ///
-    /// Phantom wallet signs: PREFIX + hex(payload)
-    /// This function reconstructs that message and verifies the signature.
-    ///
-    /// # Arguments
-    /// * `payload`    - The raw bytes (32-byte hash from Soroban auth)
-    /// * `public_key` - 32-byte Ed25519 public key from Phantom
-    /// * `signature`  - 64-byte Ed25519 signature from Phantom
-    ///
-    /// Returns true if valid. Panics if invalid (Soroban convention).
-    pub fn verify(
-        e: Env,
-        payload: Bytes,
-        public_key: BytesN<32>,
-        signature: BytesN<64>,
+    /// Optimized version using direct array indexing (g2c pattern).
+    fn verify(
+        e: &Env,
+        signature_payload: Bytes,
+        key_data: Self::KeyData,
+        sig_data: Self::SigData,
     ) -> bool {
-        // Convert payload bytes to lowercase hex string
-        let hex_payload = bytes_to_hex(&e, &payload);
+        // Decode sig_data from XDR
+        let sig_struct: Ed25519SigData =
+            Ed25519SigData::from_xdr(e, &sig_data).expect("sig_data must be valid Ed25519SigData");
 
-        // Construct the prefixed message that Phantom actually signed:
-        // "Stellar Smart Account Auth:\n" + hex(payload)
-        let mut prefixed_msg = Bytes::from_slice(&e, AUTH_PREFIX);
-        prefixed_msg.append(&hex_payload);
+        // Extract public key to BytesN (already validated by stellar_accounts)
+        if key_data.len() != 32 {
+            panic!("key_data must be 32 bytes");
+        }
+        let public_key: BytesN<32> = key_data
+            .try_into()
+            .unwrap_or_else(|_| panic!("failed to convert key_data"));
 
-        // Verify signature against the prefixed message
-        e.crypto().ed25519_verify(&public_key, &prefixed_msg, &signature);
-        true
-    }
+        // Validate prefixed_message length
+        if sig_struct.prefixed_message.len() != TOTAL_LEN as u32 {
+            panic!("prefixed_message has wrong length");
+        }
 
-    /// Verify a raw signature (no prefix transformation).
-    /// Use this for signers that can sign raw hashes.
-    pub fn verify_raw(
-        e: Env,
-        payload: Bytes,
-        public_key: BytesN<32>,
-        signature: BytesN<64>,
-    ) -> bool {
-        e.crypto().ed25519_verify(&public_key, &payload, &signature);
+        // Convert to fixed-size buffer for fast validation (g2c pattern)
+        let prefixed_msg_buf = sig_struct.prefixed_message.to_buffer::<TOTAL_LEN>();
+        let prefixed_msg_slice = prefixed_msg_buf.as_slice();
+
+        // Validate prefix using direct slice comparison
+        if &prefixed_msg_slice[0..PREFIX_LEN] != AUTH_PREFIX {
+            panic!("prefixed_message missing required prefix");
+        }
+
+        // Convert signature_payload to array for fast hex encoding
+        if signature_payload.len() != PAYLOAD_LEN as u32 {
+            panic!("signature_payload must be 32 bytes");
+        }
+        let payload_array = signature_payload.to_buffer::<PAYLOAD_LEN>();
+
+        // Generate expected hex using direct array indexing (g2c pattern)
+        let mut expected_hex = [0u8; HEX_LEN];
+        hex_encode(&mut expected_hex, payload_array.as_slice());
+
+        // Validate hex portion using direct slice comparison
+        if &prefixed_msg_slice[PREFIX_LEN..TOTAL_LEN] != &expected_hex[..] {
+            panic!("prefixed_message hex does not match payload");
+        }
+
+        // All validation passed - verify signature
+        e.crypto()
+            .ed25519_verify(&public_key, &sig_struct.prefixed_message, &sig_struct.signature);
+
         true
     }
 }
 
-/// Convert bytes to lowercase hex string as Bytes.
+/// Fast hex encoding using direct array indexing (g2c pattern).
 /// Each input byte becomes two hex characters (0-9, a-f).
-fn bytes_to_hex(e: &Env, bytes: &Bytes) -> Bytes {
+fn hex_encode(dst: &mut [u8], src: &[u8]) {
     const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-    let mut result = Bytes::new(e);
 
-    for i in 0..bytes.len() {
-        let byte = bytes.get(i).unwrap();
-        result.push_back(HEX_CHARS[(byte >> 4) as usize]);
-        result.push_back(HEX_CHARS[(byte & 0x0f) as usize]);
+    let mut di: usize = 0;
+    for &byte in src {
+        dst[di] = HEX_CHARS[(byte >> 4) as usize];
+        dst[di + 1] = HEX_CHARS[(byte & 0x0f) as usize];
+        di += 2;
     }
-
-    result
 }
 
 #[cfg(test)]
