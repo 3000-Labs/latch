@@ -1,0 +1,4 @@
+The G-to-C forwarding relay is a critical component. Clearly document the trust model and failure modes so that users and integrators understand the security boundaries.
+Cross-ecosystem wallet signing (Phantom Ed25519, MetaMask secp256k1) adds significant testing surface area. Plan for thorough cross-browser and cross-device testing of WebAuthn flows.
+Engagement with established Stellar wallet teams (Freighter, Lobstr, xBull) should begin early in the build process, not just at the documentation stage. Their input will shape SDK design decisions.
+The dApp interaction flow via URL-embedded XDR and refractor.space has payload size and UX implications. Test with real-world dApp transaction sizes to ensure the flow is robust.
