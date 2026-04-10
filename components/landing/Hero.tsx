@@ -28,7 +28,12 @@ export function Hero() {
           </Link>
           <Link href="/demo">
             <Button size="lg" variant="outline" className="font-mono h-12 px-8">
-              [Demo]
+              [Demo - Smart Acct]
+            </Button>
+          </Link>
+          <Link href="/demo-stellar">
+            <Button size="lg" variant="outline" className="font-mono h-12 px-8">
+              [Demo - Stellar]
             </Button>
           </Link>
         </div>
