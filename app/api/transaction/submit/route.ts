@@ -53,13 +53,11 @@ export async function POST(request: NextRequest) {
 
     const authEntry = xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, "base64");
 
-    // Build Ed25519SigData struct (prefixed_message + signature) and encode to XDR
-    // This is what the verifier expects as sig_data
+    // Build the Ed25519SigData as an ScMap.
+    // Map keys must be sorted lexicographically (prefixed_message < signature ✓)
     const prefixedMessageBytes = Buffer.from(prefixedMessage, "utf-8");
     const authSignatureBytes = Buffer.from(authSignatureHex, "hex");
 
-    // Create Ed25519SigData ScMap: { prefixed_message: Bytes, signature: BytesN<64> }
-    // Note: Map keys must be sorted lexicographically
     const sigDataMap = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({
         key: xdr.ScVal.scvSymbol("prefixed_message"),
@@ -71,19 +69,15 @@ export async function POST(request: NextRequest) {
       }),
     ]);
 
-    // Encode the ScMap to XDR bytes (like Rust's to_xdr() does)
-    const sigDataXdr = sigDataMap.toXDR();
+    // Serialize the ScMap to raw XDR bytes, then wrap in ScBytes.
+    // The verifier receives a Bytes Val and calls from_xdr() on it —
+    // so it expects the raw XDR of the contracttype as the byte content.
+    const sigDataBytes = xdr.ScVal.scvBytes(sigDataMap.toXDR());
 
-    // Wrap the XDR bytes in ScBytes (this is what the verifier receives as sig_data)
-    const sigDataBytes = xdr.ScVal.scvBytes(sigDataXdr);
-
-    // Build the AuthPayload named struct for the smart account auth.
+    // Build the Signatures tuple struct for the smart account auth.
     // The stellar_accounts crate defines:
-    // pub struct AuthPayload {
-    //     pub context_rule_ids: Vec<u32>,
-    //     pub signers: Map<Signer, Bytes>,
-    // }
-    // As a named struct, it serializes to XDR as a Map with Symbol keys sorted alphabetically.
+    // pub struct Signatures(pub Map<Signer, Bytes>);
+    // As a tuple struct, it serializes to XDR as an ScVec of length 1.
     const phantomPubkeyBytes = Buffer.from(publicKeyHex, "hex");
 
     const signerKey = xdr.ScVal.scvVec([
@@ -92,17 +86,20 @@ export async function POST(request: NextRequest) {
       xdr.ScVal.scvBytes(phantomPubkeyBytes),
     ]);
 
-    const authPayloadMap = xdr.ScVal.scvMap([
+    // Build the Signatures structure as an ScMap.
+    // The previously successful (though failing at verifier) diagnostic logs show
+    // that the contract expects a Map with "context_rule_ids" and "signers".
+    const signaturesScVal = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({
         key: xdr.ScVal.scvSymbol("context_rule_ids"),
-        val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(0)]), // Maps auth_contexts[0] to rule ID 0 (the default rule created in constructor)
+        val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(0)]), // Use rule ID 0 (default counter rule)
       }),
       new xdr.ScMapEntry({
         key: xdr.ScVal.scvSymbol("signers"),
         val: xdr.ScVal.scvMap([
           new xdr.ScMapEntry({
             key: signerKey,
-            val: sigDataBytes,  // XDR-encoded Ed25519SigData struct
+            val: sigDataBytes,
           }),
         ]),
       }),
@@ -110,7 +107,7 @@ export async function POST(request: NextRequest) {
 
     // Set the signature on the auth entry
     const credentials = authEntry.credentials().address();
-    credentials.signature(authPayloadMap);
+    credentials.signature(signaturesScVal);
 
     // Build new transaction with signed auth entry
     const origOp = tx.operations[0] as Operation.InvokeHostFunction;
