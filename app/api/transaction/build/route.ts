@@ -9,9 +9,20 @@ import {
   Keypair,
   Operation,
   hash,
+  Account,
+  scValToNative,
 } from "@stellar/stellar-sdk";
 import { assembleTransaction } from "@stellar/stellar-sdk/rpc";
 import { hashSorobanAuthPayload } from "@/lib/soroban-auth-payload";
+import {
+  addressStringFromCredentials,
+  classifyAuthEntryRole,
+  credentialSwitchName,
+  normalizeAuthEntries,
+  rootInvocationSummary,
+  setAddressCredentialExpiration,
+} from "@/lib/soroban-auth-entries";
+import { buildUnsignedDelegatedGCheckAuthEntry } from "@/lib/delegated-native-auth-entry";
 
 const getConfig = () => ({
   rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
@@ -19,6 +30,19 @@ const getConfig = () => ({
   counterAddress: process.env.NEXT_PUBLIC_COUNTER_ADDRESS || "CBRCNPTZ7YPP5BCGF42QSUWPYZQW6OJDPNQ4HDEYO7VI5Z6AVWWNEZ2U",
   bundlerSecret: process.env.BUNDLER_SECRET,
 });
+
+async function fundAccountIfNeeded(gAddress: string): Promise<void> {
+  try {
+    const horizonResponse = await fetch(`https://horizon-testnet.stellar.org/accounts/${gAddress}`);
+    if (horizonResponse.ok) return;
+  } catch {
+    // ignore
+  }
+  const response = await fetch(`https://friendbot.stellar.org?addr=${encodeURIComponent(gAddress)}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fund account: ${response.statusText}`);
+  }
+}
 
 export async function POST(request: NextRequest) {
   const TESTNET_CONFIG = getConfig();
@@ -30,7 +54,7 @@ export async function POST(request: NextRequest) {
   try {
     const bundlerKeypair = Keypair.fromSecret(TESTNET_CONFIG.bundlerSecret);
     const server = new rpc.Server(TESTNET_CONFIG.rpcUrl);
-    const { smartAccountAddress } = await request.json();
+    const { smartAccountAddress, signerG } = await request.json();
 
     if (!smartAccountAddress || typeof smartAccountAddress !== "string") {
       return NextResponse.json(
@@ -39,8 +63,66 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Discover the context rule id that applies to calling the counter contract.
+    // Many smart accounts have multiple context rules; hardcoding 0 can lead to auth failure.
+    let contextRuleId = 0;
+    let contextRuleDiscovery: "matched" | "fallback" = "fallback";
+    try {
+      const smartAccount = new Contract(smartAccountAddress);
+      const dummyKp = Keypair.random();
+      const dummyAccount = new Account(dummyKp.publicKey(), "0");
+
+      const countTx = new TransactionBuilder(dummyAccount, {
+        fee: "100",
+        networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+      })
+        .addOperation(smartAccount.call("get_context_rules_count"))
+        .setTimeout(30)
+        .build();
+
+      const countSim = await server.simulateTransaction(countTx);
+      if (rpc.Api.isSimulationSuccess(countSim)) {
+        const count = Number(scValToNative(countSim.result!.retval));
+        for (let id = 0; id < count; id++) {
+          const ruleTx = new TransactionBuilder(dummyAccount, {
+            fee: "100",
+            networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+          })
+            .addOperation(smartAccount.call("get_context_rule", xdr.ScVal.scvU32(id)))
+            .setTimeout(30)
+            .build();
+          const ruleSim = await server.simulateTransaction(ruleTx);
+          if (!rpc.Api.isSimulationSuccess(ruleSim)) continue;
+          const ruleNative: any = scValToNative(ruleSim.result!.retval);
+          const ctxType = ruleNative?.context_type ?? ruleNative?.contextType ?? ruleNative?.context;
+          const isCallCounter =
+            ctxType &&
+            typeof ctxType === "object" &&
+            (ctxType.CallContract === TESTNET_CONFIG.counterAddress || ctxType.callContract === TESTNET_CONFIG.counterAddress);
+          if (isCallCounter) {
+            contextRuleId = id;
+            contextRuleDiscovery = "matched";
+            break;
+          }
+        }
+      }
+    } catch {
+      contextRuleDiscovery = "fallback";
+    }
+
     // Build the transaction using bundler account as source (pays fees, signs envelope)
-    const account = await server.getAccount(bundlerKeypair.publicKey());
+    let account;
+    try {
+      account = await server.getAccount(bundlerKeypair.publicKey());
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg.includes("Account not found")) {
+        await fundAccountIfNeeded(bundlerKeypair.publicKey());
+        account = await server.getAccount(bundlerKeypair.publicKey());
+      } else {
+        throw e;
+      }
+    }
     const contract = new Contract(TESTNET_CONFIG.counterAddress);
 
     const tx = new TransactionBuilder(account, {
@@ -64,21 +146,81 @@ export async function POST(request: NextRequest) {
       throw new Error("Simulation did not succeed");
     }
 
-    const authEntries = simResult.result?.auth;
-    if (!authEntries || authEntries.length === 0) {
+    const authEntriesRaw = simResult.result?.auth;
+    const entries = normalizeAuthEntries(authEntriesRaw);
+    if (entries.length === 0) {
       throw new Error("No auth entries in simulation result");
     }
 
-    // Get the auth entry - it may already be an XDR object or a base64 string
-    const authEntry = typeof authEntries[0] === "string"
-      ? xdr.SorobanAuthorizationEntry.fromXDR(authEntries[0], "base64")
-      : authEntries[0] as xdr.SorobanAuthorizationEntry;
-    const credentials = authEntry.credentials().address();
-
-    // Set validity window - 60 ledgers (~5 minutes)
     const latestLedger = simResult.latestLedger;
-    const validUntilLedger = latestLedger + 60;
-    credentials.signatureExpirationLedger(validUntilLedger);
+    const validUntilLedger = setAddressCredentialExpiration(entries, latestLedger, 60);
+
+    const signerGStr =
+      typeof signerG === "string" && signerG.startsWith("G") ? signerG : null;
+
+    let smartAccountAuthEntryIndex = -1;
+    const delegatedNativeAuthEntryIndices: number[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const role = classifyAuthEntryRole(entries[i], smartAccountAddress, signerGStr);
+      if (role === "smart_account_custom" && smartAccountAuthEntryIndex < 0) {
+        smartAccountAuthEntryIndex = i;
+      }
+      if (role === "delegated_native") delegatedNativeAuthEntryIndices.push(i);
+    }
+
+    if (smartAccountAuthEntryIndex < 0) {
+      throw new Error(
+        "No SorobanAuthorizationEntry matches smartAccountAddress credentials; cannot build auth digest."
+      );
+    }
+
+    const smartAccountAuthEntry = entries[smartAccountAuthEntryIndex];
+
+    // 32-byte Soroban auth payload for the smart-account row (also the arg to `__check_auth` for Delegated(G) host auth).
+    const signaturePayload = hashSorobanAuthPayload(
+      smartAccountAuthEntry,
+      TESTNET_CONFIG.networkPassphrase
+    );
+
+    // OpenZeppelin Delegated(G): `require_auth_for_args((auth_digest,))` is NOT in simulation `result.auth`.
+    // Append the unsigned G row; client signs via Freighter `signBlob` on hashSorobanAuthPayload for that row (not `signAuthEntry`).
+    let delegatedGAuthEntrySynthesized = false;
+    if (signerGStr && delegatedNativeAuthEntryIndices.length === 0) {
+      entries.push(
+        buildUnsignedDelegatedGCheckAuthEntry({
+          smartAccountAddress,
+          signerG: signerGStr,
+          authPayloadHash: Buffer.from(signaturePayload),
+          signatureExpirationLedger: validUntilLedger,
+        })
+      );
+      delegatedNativeAuthEntryIndices.push(entries.length - 1);
+      delegatedGAuthEntrySynthesized = true;
+    }
+
+    if (process.env.DEBUG_SOROBAN_AUTH === "1") {
+      console.log(
+        "[DEBUG_SOROBAN_AUTH] build: authCount=%s smartAccountIndex=%s delegatedIndices=%s synthesizedG=%s contextRule=%s discovery=%s",
+        entries.length,
+        smartAccountAuthEntryIndex,
+        JSON.stringify(delegatedNativeAuthEntryIndices),
+        delegatedGAuthEntrySynthesized,
+        contextRuleId,
+        contextRuleDiscovery
+      );
+      entries.forEach((e, i) => {
+        const credAddr = addressStringFromCredentials(e);
+        const role = classifyAuthEntryRole(e, smartAccountAddress, signerGStr);
+        console.log(
+          "[DEBUG_SOROBAN_AUTH] build entry[%s] credential=%s credAddress=%s root=%s role=%s",
+          i,
+          credentialSwitchName(e),
+          credAddr ?? "(none)",
+          rootInvocationSummary(e),
+          role
+        );
+      });
+    }
 
     // Merge simulation footprint into tx (required for valid Soroban auth context)
     const assembledBuilder = assembleTransaction(tx, simResult);
@@ -88,18 +230,19 @@ export async function POST(request: NextRequest) {
       Operation.invokeHostFunction({
         source: origOp.source,
         func: origOp.func,
-        auth: [authEntry],
+        auth: entries,
       })
     );
     const assembledTx = assembledBuilder.build();
 
     // signaturePayload is the Soroban auth payload hash (32 bytes).
-    const signaturePayload = hashSorobanAuthPayload(authEntry, TESTNET_CONFIG.networkPassphrase);
+    // const signaturePayload = hashSorobanAuthPayload(authEntry, TESTNET_CONFIG.networkPassphrase);
     // The current smart-account contract binds context_rule_ids into auth_digest
     // before calling the verifier, so external signers must sign authDigestHex.
     const ruleIdsXdr = xdr.ScVal.scvVec([xdr.ScVal.scvU32(0)]).toXDR();
     const authDigest = hash(Buffer.concat([signaturePayload, Buffer.from(ruleIdsXdr)]));
     const authDigestHex = authDigest.toString("hex");
+    // const authDigestBase64 = authDigest.toString("base64");
 
     // Handle transactionData - may be string, XDR object, or SorobanDataBuilder
     let transactionDataXdr: string | undefined;
@@ -116,9 +259,22 @@ export async function POST(request: NextRequest) {
       transactionDataXdr = built.toXDR("base64");
     }
 
+    const delegatedNativeSignBlobPayloadsBase64 = delegatedNativeAuthEntryIndices.map((idx) =>
+      Buffer.from(hashSorobanAuthPayload(entries[idx], TESTNET_CONFIG.networkPassphrase)).toString(
+        "base64"
+      )
+    );
+
     return NextResponse.json({
       txXdr: assembledTx.toXDR(),
-      authEntryXdr: authEntry.toXDR("base64"),
+      authEntryXdr: smartAccountAuthEntry.toXDR("base64"),
+      authEntriesXdr: entries.map((e) => e.toXDR("base64")),
+      smartAccountAuthEntryIndex,
+      delegatedNativeAuthEntryIndices,
+      delegatedNativeSignBlobPayloadsBase64,
+      delegatedGAuthEntrySynthesized,
+      contextRuleId,
+      contextRuleDiscovery,
       simulationResultXdr: JSON.stringify({
         transactionData: transactionDataXdr,
         minResourceFee: simResult.minResourceFee,

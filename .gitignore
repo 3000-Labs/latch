@@ -25,3 +25,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+PR-Review-Comment.md
+
+# private notes
+docs/_private/
