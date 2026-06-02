@@ -71,7 +71,7 @@
     "leva": "latest",
     "lucide-react": "^0.454.0",
     "maath": "latest",
-    "next": "15.2.6",
+    "next": "15.2.8",
     "next-themes": "latest",
     "path": "latest",
     "r3f-perf": "latest",
@@ -91,7 +91,13 @@
     "zod": "3.25.67"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["@prisma/client", "@prisma/engines", "prisma", "cbor-extract", "unrs-resolver"]
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "cbor-extract",
+      "unrs-resolver"
+    ]
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.9",
