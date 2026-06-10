@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   TransactionBuilder,
   Networks,
-  StrKey,
   xdr,
   rpc,
   Transaction,
 } from "@stellar/stellar-sdk";
+import { applyDelegatedFreighterSignature } from "@/lib/delegated-check-auth-entry";
 import {
   rebuildTxWithAuthEntries,
   submitWithBundler,
@@ -49,31 +49,11 @@ export async function POST(request: NextRequest) {
     // Parse the smart account auth entry (already has AuthPayload set)
     const smartAccountEntry = xdr.SorobanAuthorizationEntry.fromXDR(smartAccountAuthEntryXdr, "base64");
 
-    // Reconstruct the signed G-address entry.
-    // Freighter returns the raw 64-byte Ed25519 signature as base64. We place it in the
-    // standard Soroban account signature format: Vec([Map({ public_key, signature })]).
-    const sigBytes = Buffer.from(signedAuthEntryBase64, "base64");
-    if (sigBytes.length !== 64) {
-      return NextResponse.json(
-        { error: `Expected 64-byte signature from Freighter, got ${sigBytes.length} bytes` },
-        { status: 400 }
-      );
-    }
-    const pubkeyBytes = StrKey.decodeEd25519PublicKey(signerAddress);
-
-    const accountSig = xdr.ScVal.scvMap([
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("public_key"),
-        val: xdr.ScVal.scvBytes(pubkeyBytes),
-      }),
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("signature"),
-        val: xdr.ScVal.scvBytes(sigBytes),
-      }),
-    ]);
-
-    const gAddrEntry = xdr.SorobanAuthorizationEntry.fromXDR(gAddressEntryTemplateXdr, "base64");
-    gAddrEntry.credentials().address().signature(xdr.ScVal.scvVec([accountSig]));
+    const gAddrEntry = applyDelegatedFreighterSignature(
+      gAddressEntryTemplateXdr,
+      signedAuthEntryBase64,
+      signerAddress
+    );
 
     const txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, [
       smartAccountEntry,

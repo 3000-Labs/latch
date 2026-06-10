@@ -12,6 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { assembleTransaction } from "@stellar/stellar-sdk/rpc";
 import {
+  computeAuthDigest,
   computeAuthDigestHex,
   hashSorobanAuthPayload,
 } from "@/lib/soroban-auth-payload";
@@ -144,15 +145,21 @@ export async function POST(request: NextRequest) {
       TESTNET_CONFIG.networkPassphrase
     );
 
+    const contextRuleIds = [contextRuleId];
+    const authDigest = computeAuthDigest(
+      smartAccountAuthEntry,
+      TESTNET_CONFIG.networkPassphrase,
+      contextRuleIds
+    );
+
     // OpenZeppelin Delegated(G): `require_auth_for_args((auth_digest,))` is NOT in simulation `result.auth`.
-    // Append the unsigned G row; client signs via Freighter `signBlob` on hashSorobanAuthPayload for that row (not `signAuthEntry`).
     let delegatedGAuthEntrySynthesized = false;
     if (signerGStr && delegatedNativeAuthEntryIndices.length === 0) {
       entries.push(
         buildUnsignedDelegatedGCheckAuthEntry({
           smartAccountAddress,
           signerG: signerGStr,
-          authPayloadHash: Buffer.from(signaturePayload),
+          authDigestHash: Buffer.from(authDigest),
           signatureExpirationLedger: validUntilLedger,
         })
       );

@@ -209,6 +209,8 @@ export default function SmartAccountsPage() {
       if (!beginRes.ok) throw new Error(begin.error ?? "Failed to begin registration");
 
       const { startRegistration } = await import("@simplewebauthn/browser");
+      const { assertWebAuthnClientAvailable } = await import("@/lib/webauthn-client");
+      assertWebAuthnClientAvailable();
       const regResponse = await startRegistration({ optionsJSON: begin.options });
 
       setPasskeyState("deploying");
@@ -254,6 +256,8 @@ export default function SmartAccountsPage() {
       if (!beginRes.ok) throw new Error(begin.error ?? "Failed to begin login");
 
       const { startAuthentication } = await import("@simplewebauthn/browser");
+      const { assertWebAuthnClientAvailable } = await import("@/lib/webauthn-client");
+      assertWebAuthnClientAvailable();
       const authResponse = await startAuthentication({ optionsJSON: begin.options });
 
       const finishRes = await fetch("/api/webauthn/authentication/finish", {

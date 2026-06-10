@@ -49,6 +49,8 @@ export type BuildAuthTransactionParams = {
   signerType: SignerType;
   signerG?: string | null;
   requireMatchedContextRule?: boolean;
+  /** Ledgers added to latest ledger for address credential expiration (default 60). */
+  authEntryLedgerTtl?: number;
 };
 
 export type BuildAuthTransactionResult = {
@@ -128,6 +130,7 @@ export async function buildAuthTransaction(
     signerType,
     signerG,
     requireMatchedContextRule = false,
+    authEntryLedgerTtl = 60,
   } = params;
 
   if (!buildOperation && !buildOperationsOnSmartAccount) {
@@ -185,7 +188,7 @@ export async function buildAuthTransaction(
   const validUntilLedger = setAddressCredentialExpiration(
     entries,
     simResult.latestLedger,
-    60
+    authEntryLedgerTtl
   );
 
   const signerGStr =
@@ -213,14 +216,20 @@ export async function buildAuthTransaction(
 
   const smartAccountAuthEntry = entries[smartAccountAuthEntryIndex];
   const signaturePayload = hashSorobanAuthPayload(smartAccountAuthEntry, networkPassphrase);
+  const contextRuleIds = [contextRuleId];
 
   let delegatedGAuthEntrySynthesized = false;
   if (signerGStr && delegatedNativeAuthEntryIndices.length === 0) {
+    const authDigest = computeAuthDigest(
+      smartAccountAuthEntry,
+      networkPassphrase,
+      contextRuleIds
+    );
     entries.push(
       buildUnsignedDelegatedGCheckAuthEntry({
         smartAccountAddress,
         signerG: signerGStr,
-        authPayloadHash: Buffer.from(signaturePayload),
+        authDigestHash: Buffer.from(authDigest),
         signatureExpirationLedger: validUntilLedger,
       })
     );
@@ -260,7 +269,6 @@ export async function buildAuthTransaction(
   );
   const assembledTx = assembledBuilder.build();
 
-  const contextRuleIds = [contextRuleId];
   const authDigestHex = computeAuthDigestHex(
     smartAccountAuthEntry,
     networkPassphrase,

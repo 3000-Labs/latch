@@ -146,17 +146,9 @@ export async function POST(request: NextRequest) {
 
     // Build the G-address auth entry for Freighter to sign.
     //
-    // The smart account's __check_auth handles Delegated(gAddress) by calling:
-    //   gAddress.require_auth_for_args((auth_digest,))
-    //
-    // In Soroban, require_auth_for_args from inside __check_auth means:
-    // "gAddress must have authorized the current __check_auth call, with args = (auth_digest,)"
-    //
-    // So the G-address auth entry's rootInvocation must be:
-    //   smartAccount.__check_auth(auth_digest)   ← NOT counter.increment(...)
-    //
-    // Freighter signs: sha256(HashIdPreimage with this invocation).
-    // The Soroban host verifies the G-address entry's Ed25519 signature against that hash.
+    // OZ delegated signers call `require_auth_for_args((auth_digest,))` where
+    // auth_digest = sha256(signature_payload || context_rule_ids.to_xdr()).
+    // The G-address entry must authorize smartAccount.__check_auth(auth_digest).
     const nonceBytes = crypto.randomBytes(8);
     const nonce = nonceBytes.readBigInt64BE(0) as unknown as xdr.Int64;
 

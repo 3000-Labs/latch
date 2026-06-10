@@ -13,6 +13,7 @@ import {
   startAuthentication,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/browser";
+import { assertWebAuthnClientAvailable } from "@/lib/webauthn-client";
 import { hash, xdr, Address } from "@stellar/stellar-sdk";
 import { hashSorobanAuthPayload } from "@/lib/soroban-auth-payload";
 
@@ -55,6 +56,7 @@ export async function registerPasskey(
 ): Promise<PasskeyRegistration> {
   const challenge = generateChallenge();
 
+  assertWebAuthnClientAvailable();
   const response = await startRegistration({
     optionsJSON: {
       challenge,
@@ -106,6 +108,7 @@ export async function signWithPasskey(
   authDigest: Buffer,
   rpId?: string
 ): Promise<PasskeySignature> {
+  assertWebAuthnClientAvailable();
   const response = await startAuthentication({
     optionsJSON: {
       challenge: b64uEncode(authDigest),
