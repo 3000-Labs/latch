@@ -38,3 +38,9 @@ reference/stellar-dev-skill
 send-token-docs.md
 
 certificates
+
+EXTENSION_IMPLEMENTATION_DIRECTIONS.md
+EXTERNAL_SIGN_API.md
+LATCH_API_EXTERNAL_SIGN_SPEC.md
+Moonpay-llms-full.txt
+V0_LATCH_STELLAR_SIGN_DEMO_APP_SPEC.md

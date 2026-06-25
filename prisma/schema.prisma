@@ -263,3 +263,14 @@ model MultisigApproval {
   @@index([proposalId], map: "multisig_approvals_proposal_idx")
   @@map("multisig_approvals")
 }
+
+model SignPayload {
+  id         String    @id
+  payload    Json
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([expiresAt], map: "sign_payloads_expires_at_idx")
+  @@map("sign_payloads")
+}

@@ -12,7 +12,10 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "test:sign-demo:unit": "node --test lib/sign-demo/*.test.mjs",
+    "test:sign-demo": "node scripts/test-sign-demo-api.mjs",
+    "test:sign-demo:all": "node --test lib/sign-demo/*.test.mjs && node scripts/test-sign-demo-api.mjs"
   },
   "dependencies": {
     "@eslint/eslintrc": "latest",
