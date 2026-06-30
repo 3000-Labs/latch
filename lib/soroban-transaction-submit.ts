@@ -1,24 +1,49 @@
-import {
-  Keypair,
-  Operation,
-  rpc,
-  Transaction,
-  TransactionBuilder,
-  xdr,
-} from "@stellar/stellar-sdk";
+import { Keypair, Operation, rpc, Transaction, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
 import { getBundlerAccount } from "@/lib/soroban-bundler";
+
+function decodeTxResultError(errorResult: xdr.TransactionResult | undefined): string {
+  if (!errorResult) return "unknown error";
+  try {
+    const result = errorResult.result();
+    const name = result.switch().name;
+    if (name === "txBadSeq") {
+      return "tx_bad_seq (bundler account sequence was stale; retry submit)";
+    }
+    return name;
+  } catch {
+    return errorResult.toXDR("base64");
+  }
+}
+
+export async function refreshBundlerSequence(
+  server: rpc.Server,
+  tx: Transaction,
+  networkPassphrase: string,
+  bundlerSecret: string
+): Promise<Transaction> {
+  const bundlerKeypair = Keypair.fromSecret(bundlerSecret);
+  const freshAccount = await getBundlerAccount(server, bundlerKeypair);
+  return TransactionBuilder.cloneFrom(tx, {
+    fee: tx.fee,
+    networkPassphrase,
+    account: freshAccount,
+  }).build();
+}
 
 export type SubmitAssembledParams = {
   server: rpc.Server;
   networkPassphrase: string;
   bundlerSecret: string;
   txWithAuth: Transaction;
+  /** Max poll attempts after send (default 20). */
   pollAttempts?: number;
+  /** Ms between getTransaction polls (default 500). */
+  pollIntervalMs?: number;
 };
 
 export type SubmitAssembledResult = {
   hash: string;
-  status: "SUCCESS";
+  status: "SUCCESS" | "PENDING";
 };
 
 export async function submitWithBundler(
@@ -29,24 +54,39 @@ export async function submitWithBundler(
     networkPassphrase,
     bundlerSecret,
     txWithAuth,
-    pollAttempts = 30,
+    pollAttempts = 20,
+    pollIntervalMs = 500,
   } = params;
 
-  const enforcingSim = await server.simulateTransaction(txWithAuth);
+  const bundlerKeypair = Keypair.fromSecret(bundlerSecret);
+
+  const txFresh = await refreshBundlerSequence(
+    server,
+    txWithAuth,
+    networkPassphrase,
+    bundlerSecret
+  );
+
+  const enforcingSim = await server.simulateTransaction(txFresh);
 
   if (rpc.Api.isSimulationError(enforcingSim)) {
-    throw new Error(`Auth validation failed: ${enforcingSim.error}`);
+    const simError = enforcingSim.error ?? "";
+    if (simError.includes("#3014") || simError.includes("InvalidAction")) {
+      throw new Error(
+        `Auth validation failed: Smart account rejected this swap authorization. Ensure swap context rule signers match your login method (passkey vs Freighter). (${simError})`
+      );
+    }
+    throw new Error(`Auth validation failed: ${simError}`);
   }
 
-  const assembledTx = rpc.assembleTransaction(txWithAuth, enforcingSim).build();
-  const bundlerKeypair = Keypair.fromSecret(bundlerSecret);
+  const assembledTx = rpc.assembleTransaction(txFresh, enforcingSim).build();
   await getBundlerAccount(server, bundlerKeypair);
   assembledTx.sign(bundlerKeypair);
 
   const sendResult = await server.sendTransaction(assembledTx);
   if (sendResult.status === "ERROR") {
     throw new Error(
-      `Transaction submission failed: ${sendResult.errorResult?.toXDR("base64")}`
+      `Transaction submission failed: ${decodeTxResultError(sendResult.errorResult)}`
     );
   }
 
@@ -54,8 +94,16 @@ export async function submitWithBundler(
   let txResult: rpc.Api.GetTransactionResponse | undefined;
 
   for (let i = 0; i < pollAttempts; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
+    if (i > 0) {
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
     txResult = await server.getTransaction(txHash);
+    if (txResult.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return { hash: txHash, status: "SUCCESS" };
+    }
+    if (txResult.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new Error(`Transaction failed: ${txResult.status}`);
+    }
     if (txResult.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) {
       break;
     }
@@ -65,7 +113,8 @@ export async function submitWithBundler(
     return { hash: txHash, status: "SUCCESS" };
   }
 
-  throw new Error(`Transaction failed: ${txResult?.status ?? "UNKNOWN"}`);
+  // Submitted to the network; confirmation may still be in flight (client can poll Horizon).
+  return { hash: txHash, status: "PENDING" };
 }
 
 export function rebuildTxWithAuthEntries(

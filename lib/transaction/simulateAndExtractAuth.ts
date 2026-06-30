@@ -11,6 +11,7 @@ import { assembleTransaction } from "@stellar/stellar-sdk/rpc";
 import {
   computeAuthDigest,
   computeAuthDigestHex,
+  contextRuleIdsForEntry,
   hashSorobanAuthPayload,
 } from "@/lib/soroban-auth-payload";
 import {
@@ -22,8 +23,10 @@ import {
   setAddressCredentialExpiration,
 } from "@/lib/soroban-auth-entries";
 import { buildUnsignedDelegatedGCheckAuthEntry } from "@/lib/delegated-native-auth-entry";
+import { canServerSignDelegatedG } from "@/lib/bundler-config";
 import {
   discoverContextRule,
+  hasMatchedCallContractRule,
   type ContextRuleDiscovery,
 } from "@/lib/soroban-context-rules";
 import { ApiRequestError } from "@/lib/api-errors";
@@ -41,7 +44,14 @@ export type SimulateAndExtractAuthParams = {
   contextRuleDiscovery?: ContextRuleDiscovery;
   signerType?: SignerType;
   signerG?: string | null;
+  /** Bundler G for envelope fee payer / optional delegated __check_auth synthesis. */
+  feePayerG?: string | null;
+  /** On-chain Delegated G for smart-account AuthPayload (may differ from fee payer). */
+  delegatedAuthG?: string | null;
+  /** Smart-account rule uses Delegated(bundler) only — prefill + server-side submit. */
+  bundlerDelegatedAuthMode?: boolean;
   authEntryLedgerTtl?: number;
+  requireMatchedContextRule?: boolean;
 };
 
 export type SimulateAndExtractAuthResult = {
@@ -53,6 +63,7 @@ export type SimulateAndExtractAuthResult = {
   delegatedNativeSignBlobPayloadsBase64: string[];
   delegatedGAuthEntrySynthesized: boolean;
   contextRuleId: number;
+  contextRuleIds: number[];
   contextRuleDiscovery: ContextRuleDiscovery;
   authDigestHex: string;
   signaturePayloadHex: string;
@@ -87,7 +98,7 @@ export function serializeSimulationData(
   });
 }
 
-function buildDelegatedAuthPayload(gAddress: string, contextRuleId: number): xdr.ScVal {
+function buildDelegatedAuthPayload(gAddress: string, contextRuleIds: number[]): xdr.ScVal {
   const signerKey = xdr.ScVal.scvVec([
     xdr.ScVal.scvSymbol("Delegated"),
     new Address(gAddress).toScVal(),
@@ -96,7 +107,7 @@ function buildDelegatedAuthPayload(gAddress: string, contextRuleId: number): xdr
   return xdr.ScVal.scvMap([
     new xdr.ScMapEntry({
       key: xdr.ScVal.scvSymbol("context_rule_ids"),
-      val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(contextRuleId)]),
+      val: xdr.ScVal.scvVec(contextRuleIds.map((id) => xdr.ScVal.scvU32(id))),
     }),
     new xdr.ScMapEntry({
       key: xdr.ScVal.scvSymbol("signers"),
@@ -112,15 +123,69 @@ function buildDelegatedAuthPayload(gAddress: string, contextRuleId: number): xdr
 
 function resolveSignerG(
   signerType: SignerType | undefined,
-  signerG: string | null | undefined
+  signerG: string | null | undefined,
+  _feePayerG: string | null | undefined
 ): string | null {
   if (signerType === "freighter" && typeof signerG === "string" && signerG.startsWith("G")) {
     return signerG;
   }
-  if (typeof signerG === "string" && signerG.startsWith("G")) {
-    return signerG;
-  }
   return null;
+}
+
+function buildDelegatedGAddressSigningTemplates(args: {
+  smartAccountAddress: string;
+  signerG: string;
+  authDigest: Buffer;
+  validUntilLedger: number;
+  networkPassphrase: string;
+  contextRuleId: number;
+}): {
+  gAddressPreimageXdr: string;
+  gAddressEntryTemplateXdr: string;
+} {
+  const { smartAccountAddress, signerG, authDigest, validUntilLedger, networkPassphrase } =
+    args;
+
+  const nonceBytes = crypto.randomBytes(8);
+  const nonce = nonceBytes.readBigInt64BE(0) as unknown as xdr.Int64;
+
+  const gAddrInvocation = new xdr.SorobanAuthorizedInvocation({
+    function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+      new xdr.InvokeContractArgs({
+        contractAddress: new Address(smartAccountAddress).toScAddress(),
+        functionName: "__check_auth",
+        args: [xdr.ScVal.scvBytes(authDigest)],
+      })
+    ),
+    subInvocations: [],
+  });
+
+  const networkId = hash(Buffer.from(networkPassphrase));
+  const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+    new xdr.HashIdPreimageSorobanAuthorization({
+      networkId,
+      nonce,
+      signatureExpirationLedger: validUntilLedger,
+      invocation: gAddrInvocation,
+    })
+  );
+
+  const gAddrEntry = new xdr.SorobanAuthorizationEntry({
+    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+      new xdr.SorobanAddressCredentials({
+        address: new Address(signerG).toScAddress(),
+        nonce,
+        signatureExpirationLedger: validUntilLedger,
+        signature: xdr.ScVal.scvVoid(),
+      })
+    ),
+    rootInvocation: gAddrInvocation,
+  });
+
+  return {
+    gAddressPreimageXdr: preimage.toXDR("base64"),
+    gAddressEntryTemplateXdr: gAddrEntry.toXDR("base64"),
+  };
 }
 
 export async function simulateAndExtractAuth(
@@ -134,7 +199,11 @@ export async function simulateAndExtractAuth(
     targetContractId,
     signerType,
     signerG,
+    feePayerG,
     authEntryLedgerTtl = 60,
+    requireMatchedContextRule = false,
+    bundlerDelegatedAuthMode = false,
+    delegatedAuthG,
   } = params;
 
   let contextRuleId = params.contextRuleId;
@@ -149,6 +218,14 @@ export async function simulateAndExtractAuth(
     );
     contextRuleId = discovered.contextRuleId;
     contextRuleDiscovery = discovered.discovery;
+  }
+
+  if (requireMatchedContextRule && !hasMatchedCallContractRule(contextRuleDiscovery)) {
+    throw new ApiRequestError(
+      "NO_CONTEXT_RULE",
+      `No context rule allows CallContract(${targetContractId}). Run setup-send-rules or setup-swap-rules first.`,
+      409
+    );
   }
 
   const txForSimulation = stripInvokeAuthEntries(tx, networkPassphrase);
@@ -180,7 +257,7 @@ export async function simulateAndExtractAuth(
     authEntryLedgerTtl
   );
 
-  const signerGStr = resolveSignerG(signerType, signerG);
+  const signerGStr = resolveSignerG(signerType, signerG, feePayerG);
 
   let smartAccountAuthEntryIndex = -1;
   const delegatedNativeAuthEntryIndices: number[] = [];
@@ -202,10 +279,14 @@ export async function simulateAndExtractAuth(
 
   const smartAccountAuthEntry = entries[smartAccountAuthEntryIndex];
   const signaturePayload = hashSorobanAuthPayload(smartAccountAuthEntry, networkPassphrase);
-  const contextRuleIds = [contextRuleId];
+  const contextRuleIds = contextRuleIdsForEntry(smartAccountAuthEntry, contextRuleId);
 
   let delegatedGAuthEntrySynthesized = false;
-  if (signerGStr && delegatedNativeAuthEntryIndices.length === 0) {
+
+  function synthesizeDelegatedGEntry(signerGForEntry: string): void {
+    if (entries.some((e) => addressStringFromCredentials(e) === signerGForEntry)) {
+      return;
+    }
     const authDigest = computeAuthDigest(
       smartAccountAuthEntry,
       networkPassphrase,
@@ -214,13 +295,27 @@ export async function simulateAndExtractAuth(
     entries.push(
       buildUnsignedDelegatedGCheckAuthEntry({
         smartAccountAddress,
-        signerG: signerGStr,
+        signerG: signerGForEntry,
         authDigestHash: Buffer.from(authDigest),
         signatureExpirationLedger: validUntilLedger,
       })
     );
     delegatedNativeAuthEntryIndices.push(entries.length - 1);
     delegatedGAuthEntrySynthesized = true;
+  }
+
+  if (signerGStr && delegatedNativeAuthEntryIndices.length === 0) {
+    synthesizeDelegatedGEntry(signerGStr);
+  }
+
+  // Freighter swaps: bundler fee-payer may also need a separate __check_auth entry.
+  if (
+    signerType === "freighter" &&
+    typeof feePayerG === "string" &&
+    feePayerG.startsWith("G") &&
+    feePayerG !== signerGStr
+  ) {
+    synthesizeDelegatedGEntry(feePayerG);
   }
 
   if (process.env.DEBUG_SOROBAN_AUTH === "1") {
@@ -285,6 +380,7 @@ export async function simulateAndExtractAuth(
     delegatedNativeSignBlobPayloadsBase64,
     delegatedGAuthEntrySynthesized,
     contextRuleId,
+    contextRuleIds,
     contextRuleDiscovery,
     authDigestHex,
     signaturePayloadHex: signaturePayload.toString("hex"),
@@ -294,6 +390,47 @@ export async function simulateAndExtractAuth(
     minResourceFee: simResult.minResourceFee ?? "0",
   };
 
+  if (bundlerDelegatedAuthMode) {
+    const authG = delegatedAuthG ?? feePayerG;
+    if (!authG) {
+      throw new ApiRequestError(
+        "validation_error",
+        "delegatedAuthG or feePayerG is required for bundler delegated auth mode.",
+        400
+      );
+    }
+
+    const smartAccountCreds = smartAccountAuthEntry.credentials().address();
+    smartAccountCreds.signature(buildDelegatedAuthPayload(authG, contextRuleIds));
+    synthesizeDelegatedGEntry(authG);
+
+    base.authEntryXdr = smartAccountAuthEntry.toXDR("base64");
+    base.authEntriesXdr = entries.map((e) => e.toXDR("base64"));
+    base.smartAccountAuthEntryXdr = smartAccountAuthEntry.toXDR("base64");
+    base.delegatedGAuthEntrySynthesized = delegatedGAuthEntrySynthesized;
+    base.delegatedNativeAuthEntryIndices = [...delegatedNativeAuthEntryIndices];
+
+    if (!canServerSignDelegatedG(authG)) {
+      const authDigest = computeAuthDigest(
+        smartAccountAuthEntry,
+        networkPassphrase,
+        contextRuleIds
+      );
+      const templates = buildDelegatedGAddressSigningTemplates({
+        smartAccountAddress,
+        signerG: authG,
+        authDigest: Buffer.from(authDigest),
+        validUntilLedger,
+        networkPassphrase,
+        contextRuleId,
+      });
+      base.gAddressPreimageXdr = templates.gAddressPreimageXdr;
+      base.gAddressEntryTemplateXdr = templates.gAddressEntryTemplateXdr;
+    }
+
+    return base;
+  }
+
   if (signerType === "freighter" && signerGStr) {
     const smartAccountCreds = smartAccountAuthEntry.credentials().address();
     const authDigest = computeAuthDigest(
@@ -301,48 +438,20 @@ export async function simulateAndExtractAuth(
       networkPassphrase,
       contextRuleIds
     );
-    const authPayload = buildDelegatedAuthPayload(signerGStr, contextRuleId);
+    const authPayload = buildDelegatedAuthPayload(signerGStr, contextRuleIds);
     smartAccountCreds.signature(authPayload);
 
-    const nonceBytes = crypto.randomBytes(8);
-    const nonce = nonceBytes.readBigInt64BE(0) as unknown as xdr.Int64;
-
-    const gAddrInvocation = new xdr.SorobanAuthorizedInvocation({
-      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-        new xdr.InvokeContractArgs({
-          contractAddress: new Address(smartAccountAddress).toScAddress(),
-          functionName: "__check_auth",
-          args: [xdr.ScVal.scvBytes(authDigest)],
-        })
-      ),
-      subInvocations: [],
+    const templates = buildDelegatedGAddressSigningTemplates({
+      smartAccountAddress,
+      signerG: signerGStr,
+      authDigest: Buffer.from(authDigest),
+      validUntilLedger,
+      networkPassphrase,
+      contextRuleId,
     });
-
-    const networkId = hash(Buffer.from(networkPassphrase));
-    const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
-      new xdr.HashIdPreimageSorobanAuthorization({
-        networkId,
-        nonce,
-        signatureExpirationLedger: validUntilLedger,
-        invocation: gAddrInvocation,
-      })
-    );
-
-    const gAddrEntry = new xdr.SorobanAuthorizationEntry({
-      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
-        new xdr.SorobanAddressCredentials({
-          address: new Address(signerGStr).toScAddress(),
-          nonce,
-          signatureExpirationLedger: validUntilLedger,
-          signature: xdr.ScVal.scvVoid(),
-        })
-      ),
-      rootInvocation: gAddrInvocation,
-    });
-
     base.smartAccountAuthEntryXdr = smartAccountAuthEntry.toXDR("base64");
-    base.gAddressPreimageXdr = preimage.toXDR("base64");
-    base.gAddressEntryTemplateXdr = gAddrEntry.toXDR("base64");
+    base.gAddressPreimageXdr = templates.gAddressPreimageXdr;
+    base.gAddressEntryTemplateXdr = templates.gAddressEntryTemplateXdr;
   }
 
   return base;

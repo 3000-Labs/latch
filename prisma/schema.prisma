@@ -274,3 +274,20 @@ model SignPayload {
   @@index([expiresAt], map: "sign_payloads_expires_at_idx")
   @@map("sign_payloads")
 }
+
+model OnRampIntent {
+  id                    String   @id
+  memoId                String   @unique @map("memo_id")
+  destinationCAddress   String   @map("destination_c_address")
+  externalCustomerId    String   @map("external_customer_id")
+  moonpayTransactionId  String?  @map("moonpay_transaction_id")
+  status                String   @default("created")
+  fiatAmount            String   @map("fiat_amount")
+  fiatCode              String   @map("fiat_code")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@index([status], map: "on_ramp_intents_status_idx")
+  @@index([externalCustomerId], map: "on_ramp_intents_customer_idx")
+  @@map("on_ramp_intents")
+}

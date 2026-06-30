@@ -5,6 +5,7 @@ import { isNetwork, NetworkConfigError, resolveNetwork } from "@/lib/network";
 import { prepareExternalSign } from "@/lib/transaction/prepareExternalSign";
 import type { SignerType } from "@/lib/soroban-transaction-build";
 
+export const maxDuration = 60;
 export const runtime = "nodejs";
 
 const SIGNER_TYPES = new Set<SignerType>(["passkey", "phantom", "freighter"]);
@@ -12,7 +13,16 @@ const SIGNER_TYPES = new Set<SignerType>(["passkey", "phantom", "freighter"]);
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { network, smartAccountAddress, unsignedTxXdr, signerType, signerG } = body;
+    const {
+      network,
+      smartAccountAddress,
+      unsignedTxXdr,
+      signerType,
+      signerG,
+      feePayerG,
+      contextRuleId,
+      contextRuleDiscovery,
+    } = body;
 
     if (!network || !isNetwork(network)) {
       return apiError({
@@ -71,6 +81,12 @@ export async function POST(request: NextRequest) {
       unsignedTxXdr,
       signerType,
       signerG,
+      feePayerG,
+      contextRuleId:
+        contextRuleId !== undefined && contextRuleId !== null
+          ? Number(contextRuleId)
+          : undefined,
+      contextRuleDiscovery,
     });
 
     return NextResponse.json(result);

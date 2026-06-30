@@ -49,6 +49,59 @@ export function buildAddContextRuleOperations(
   );
 }
 
+export function buildRemoveContextRuleOperation(
+  smartAccount: Contract,
+  ruleId: number
+): Operation {
+  return smartAccount.call("remove_context_rule", xdr.ScVal.scvU32(ruleId)) as Operation;
+}
+
+export function buildAddSignerOperation(
+  smartAccount: Contract,
+  contextRuleId: number,
+  signer: xdr.ScVal
+): Operation {
+  return smartAccount.call(
+    "add_signer",
+    xdr.ScVal.scvU32(contextRuleId),
+    signer
+  ) as Operation;
+}
+
+export function buildRemoveSignerOperation(
+  smartAccount: Contract,
+  contextRuleId: number,
+  signer: xdr.ScVal
+): Operation {
+  return smartAccount.call(
+    "remove_signer",
+    xdr.ScVal.scvU32(contextRuleId),
+    signer
+  ) as Operation;
+}
+
+/** Swap Delegated(oldG) → Delegated(newG) on one context rule without removing the rule. */
+export function buildRealignDelegatedBundlerSignerOperations(
+  smartAccount: Contract,
+  contextRuleId: number,
+  oldDelegatedG: string,
+  newDelegatedG: string
+): Operation[] {
+  if (oldDelegatedG === newDelegatedG) return [];
+  return [
+    buildAddSignerOperation(
+      smartAccount,
+      contextRuleId,
+      buildDelegatedSignerScVal(newDelegatedG)
+    ),
+    buildRemoveSignerOperation(
+      smartAccount,
+      contextRuleId,
+      buildDelegatedSignerScVal(oldDelegatedG)
+    ),
+  ];
+}
+
 export function buildExternalSignerScVal(
   verifierAddress: string,
   keyData: Buffer

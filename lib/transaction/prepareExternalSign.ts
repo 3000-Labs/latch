@@ -1,9 +1,25 @@
-import { Keypair, rpc } from "@stellar/stellar-sdk";
+import { rpc } from "@stellar/stellar-sdk";
 import type { Network } from "@/lib/network";
 import { resolveNetwork } from "@/lib/network";
 import { ApiRequestError } from "@/lib/api-errors";
+import { isSwapRouterContractId } from "@/lib/swap-routers";
+import {
+  discoverContextRule,
+  discoverDefaultContextRule,
+  fetchContextRuleAtId,
+  hasMatchedCallContractRule,
+  type ContextRuleDiscovery,
+} from "@/lib/soroban-context-rules";
+import {
+  resolveBundlerFeePayerG,
+} from "@/lib/bundler-config";
 import type { SignerType } from "@/lib/soroban-transaction-build";
 import { simulateAndExtractAuth } from "@/lib/transaction/simulateAndExtractAuth";
+import {
+  validateContextRuleForSignerType,
+  assertSwapRuleReadyForSign,
+  resolveSwapAuthMode,
+} from "@/lib/transaction/validateContextRuleSigners";
 import { estimateFees } from "@/lib/transaction/estimateFees";
 import {
   buildReviewWarnings,
@@ -22,6 +38,11 @@ export type PrepareSignRequest = {
   unsignedTxXdr: string;
   signerType?: SignerType;
   signerG?: string;
+  /** Bundler public G when tx source is bundler; used for delegated entry synthesis only. */
+  feePayerG?: string;
+  /** When known (e.g. from build-swap), skips on-chain rule scan in prepare-sign. */
+  contextRuleId?: number;
+  contextRuleDiscovery?: ContextRuleDiscovery;
 };
 
 export type PrepareSignResponse = {
@@ -31,7 +52,10 @@ export type PrepareSignResponse = {
   authEntryXdr: string;
   authEntriesXdr: string[];
   smartAccountAuthEntryIndex: number;
+  delegatedNativeAuthEntryIndices: number[];
+  delegatedGAuthEntrySynthesized: boolean;
   contextRuleId: number;
+  contextRuleIds: number[];
   authDigestHex: string;
   signaturePayloadHex: string;
   validUntilLedger: number;
@@ -44,6 +68,7 @@ export type PrepareSignResponse = {
   feeLabel: string;
   operations: PreparedSignOperation[];
   warnings: string[];
+  submitMethod?: "bundler-delegated" | "delegated" | "webauthn";
 };
 
 export async function prepareExternalSign(
@@ -63,15 +88,87 @@ export async function prepareExternalSign(
     );
   }
 
+  const feePayerG = resolveBundlerFeePayerG(req.feePayerG);
+
+  let contextRuleId = req.contextRuleId;
+  let discovery = req.contextRuleDiscovery;
+
+  if (contextRuleId === undefined || discovery === undefined) {
+    if (isSwapRouterContractId(targetContractId)) {
+      const discovered = await discoverDefaultContextRule(
+        server,
+        networkPassphrase,
+        req.smartAccountAddress
+      );
+      contextRuleId = discovered.contextRuleId;
+      discovery = discovered.discovery;
+    } else {
+      const discovered = await discoverContextRule(
+        server,
+        networkPassphrase,
+        req.smartAccountAddress,
+        targetContractId
+      );
+      contextRuleId = discovered.contextRuleId;
+      discovery = discovered.discovery;
+    }
+  }
+  const swapRule = await fetchContextRuleAtId(
+    server,
+    networkPassphrase,
+    req.smartAccountAddress,
+    contextRuleId
+  );
+
+  if (isSwapRouterContractId(targetContractId)) {
+    const swapAuth = resolveSwapAuthMode({
+      rule: swapRule,
+      signerType: req.signerType ?? "passkey",
+      signerG: req.signerG,
+    });
+    if (swapAuth.needsPasskeySetup) {
+      assertSwapRuleReadyForSign({ rule: swapRule, contextRuleId });
+    }
+  } else if (hasMatchedCallContractRule(discovery)) {
+    assertSwapRuleReadyForSign({ rule: swapRule, contextRuleId });
+  }
+
+  const swapAuth = isSwapRouterContractId(targetContractId)
+    ? resolveSwapAuthMode({
+        rule: swapRule,
+        signerType: req.signerType ?? "passkey",
+        signerG: req.signerG,
+      })
+    : { useDelegatedAuth: false, needsPasskeySetup: false };
+
   const auth = await simulateAndExtractAuth({
     server,
     networkPassphrase,
     tx,
     smartAccountAddress: req.smartAccountAddress,
     targetContractId,
+    contextRuleId,
+    contextRuleDiscovery: discovery,
     signerType: req.signerType,
-    signerG: req.signerG,
+    signerG: swapAuth.useDelegatedAuth ? swapAuth.delegatedAuthG : req.signerG,
+    feePayerG,
+    requireMatchedContextRule: !isSwapRouterContractId(targetContractId),
+    bundlerDelegatedAuthMode: swapAuth.useDelegatedAuth,
+    delegatedAuthG: swapAuth.delegatedAuthG,
   });
+
+  if (req.signerType && feePayerG && !swapAuth.useDelegatedAuth) {
+    await validateContextRuleForSignerType({
+      server,
+      networkPassphrase,
+      smartAccountAddress: req.smartAccountAddress,
+      contextRuleId: auth.contextRuleId,
+      signerType: req.signerType,
+      signerG: req.signerG,
+      feePayerG,
+      bundlerPublicKey: feePayerG,
+    });
+  }
 
   const feeEstimate = estimateFees(
     {
@@ -96,7 +193,10 @@ export async function prepareExternalSign(
     authEntryXdr: auth.authEntryXdr,
     authEntriesXdr: auth.authEntriesXdr,
     smartAccountAuthEntryIndex: auth.smartAccountAuthEntryIndex,
+    delegatedNativeAuthEntryIndices: auth.delegatedNativeAuthEntryIndices,
+    delegatedGAuthEntrySynthesized: auth.delegatedGAuthEntrySynthesized,
     contextRuleId: auth.contextRuleId,
+    contextRuleIds: auth.contextRuleIds,
     authDigestHex: auth.authDigestHex,
     signaturePayloadHex: auth.signaturePayloadHex,
     validUntilLedger: auth.validUntilLedger,
@@ -108,13 +208,12 @@ export async function prepareExternalSign(
     feeLabel: feeEstimate.feeLabel,
     operations,
     warnings,
+    submitMethod: bundlerOnlyRule
+      ? "bundler-delegated"
+      : req.signerType === "freighter"
+        ? "delegated"
+        : req.signerType === "passkey" || req.signerType === "phantom"
+          ? "webauthn"
+          : undefined,
   };
-}
-
-export function getBundlerKeypair(): Keypair {
-  const secret = process.env.BUNDLER_SECRET;
-  if (!secret) {
-    throw new ApiRequestError("internal_error", "BUNDLER_SECRET is not set.", 500);
-  }
-  return Keypair.fromSecret(secret);
 }

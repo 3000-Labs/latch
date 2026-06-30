@@ -7,13 +7,22 @@ import {
   Transaction,
   TransactionBuilder,
   nativeToScVal,
+  xdr,
 } from "@stellar/stellar-sdk";
 import { getBundlerAccount } from "@/lib/soroban-bundler";
 import {
   discoverContextRule,
+  discoverDefaultContextRule,
+  fetchContextRuleAtId,
   hasMatchedCallContractRule,
+  ruleHasExternalSigner,
   type ContextRuleDiscovery,
 } from "@/lib/soroban-context-rules";
+import {
+  getBundlerPublicKey,
+  canServerSignDelegatedG,
+  delegatedGFromContextRule,
+} from "@/lib/bundler-config";
 import { simulateAndExtractAuth } from "@/lib/transaction/simulateAndExtractAuth";
 
 export type SignerType = "passkey" | "phantom" | "freighter";
@@ -32,6 +41,14 @@ export type BuildAuthTransactionParams = {
   ) => Operation[];
   signerType: SignerType;
   signerG?: string | null;
+  /** Bundler G used only for delegated __check_auth entry synthesis (passkey + fee-payer txs). */
+  feePayerG?: string | null;
+  /** On-chain Delegated G for smart-account AuthPayload (setup admin rules). */
+  delegatedAuthG?: string | null;
+  /** On-chain rule authorizes only Delegated(bundler). */
+  bundlerDelegatedAuthMode?: boolean;
+  /** Use Default context rule (id 0) — required for DEX swaps (see mobile wallet reference). */
+  useDefaultContextRule?: boolean;
   requireMatchedContextRule?: boolean;
   /** Ledgers added to latest ledger for address credential expiration (default 60). */
   authEntryLedgerTtl?: number;
@@ -46,6 +63,7 @@ export type BuildAuthTransactionResult = {
   delegatedNativeSignBlobPayloadsBase64: string[];
   delegatedGAuthEntrySynthesized: boolean;
   contextRuleId: number;
+  contextRuleIds: number[];
   contextRuleDiscovery: ContextRuleDiscovery;
   authDigestHex: string;
   signaturePayloadHex: string;
@@ -55,6 +73,8 @@ export type BuildAuthTransactionResult = {
   smartAccountAuthEntryXdr?: string;
   gAddressPreimageXdr?: string;
   gAddressEntryTemplateXdr?: string;
+  submitMethod?: "bundler-delegated" | "delegated" | "webauthn";
+  delegatedAuthG?: string;
 };
 
 export async function buildUnsignedSorobanTransaction(
@@ -113,20 +133,46 @@ export async function buildAuthTransaction(
     targetContractId,
     signerType,
     signerG,
+    feePayerG,
     requireMatchedContextRule = false,
     authEntryLedgerTtl = 60,
+    bundlerDelegatedAuthMode = false,
+    useDefaultContextRule = false,
+    delegatedAuthG: delegatedAuthGFromParams,
   } = params;
 
-  const { contextRuleId, discovery: contextRuleDiscovery } = await discoverContextRule(
-    server,
-    networkPassphrase,
-    smartAccountAddress,
-    targetContractId
-  );
+  const isSetupTx = Boolean(params.buildOperationsOnSmartAccount);
+
+  const { contextRuleId, discovery: contextRuleDiscovery } = isSetupTx || useDefaultContextRule
+    ? await discoverDefaultContextRule(server, networkPassphrase, smartAccountAddress)
+    : await discoverContextRule(
+        server,
+        networkPassphrase,
+        smartAccountAddress,
+        targetContractId
+      );
+
+  let useBundlerDelegatedAuth = bundlerDelegatedAuthMode;
+  let delegatedAuthG: string | undefined = delegatedAuthGFromParams ?? undefined;
+  if (isSetupTx && !useBundlerDelegatedAuth) {
+    const adminRule = await fetchContextRuleAtId(
+      server,
+      networkPassphrase,
+      smartAccountAddress,
+      contextRuleId
+    );
+    const ruleG = adminRule ? delegatedGFromContextRule(adminRule) : null;
+    if (ruleG && !ruleHasExternalSigner(adminRule!)) {
+      useBundlerDelegatedAuth = true;
+      delegatedAuthG = ruleG;
+    }
+  }
+
+  const envelopeFeePayerG = feePayerG ?? getBundlerPublicKey();
 
   if (requireMatchedContextRule && !hasMatchedCallContractRule(contextRuleDiscovery)) {
     const err = new Error(
-      `No context rule allows CallContract(${targetContractId}). Run setup-send-rules first.`
+      `No context rule allows CallContract(${targetContractId}). Run setup-send-rules or setup-swap-rules first.`
     ) as Error & { code?: string };
     err.code = "NO_CONTEXT_RULE";
     throw err;
@@ -144,8 +190,13 @@ export async function buildAuthTransaction(
     contextRuleDiscovery,
     signerType,
     signerG,
+    feePayerG: envelopeFeePayerG,
+    delegatedAuthG,
     authEntryLedgerTtl,
+    bundlerDelegatedAuthMode: useBundlerDelegatedAuth,
   });
+
+  const authDelegatedG = delegatedAuthG ?? envelopeFeePayerG;
 
   return {
     txXdr: auth.txXdr,
@@ -156,6 +207,7 @@ export async function buildAuthTransaction(
     delegatedNativeSignBlobPayloadsBase64: auth.delegatedNativeSignBlobPayloadsBase64,
     delegatedGAuthEntrySynthesized: auth.delegatedGAuthEntrySynthesized,
     contextRuleId: auth.contextRuleId,
+    contextRuleIds: auth.contextRuleIds,
     contextRuleDiscovery: auth.contextRuleDiscovery,
     authDigestHex: auth.authDigestHex,
     signaturePayloadHex: auth.signaturePayloadHex,
@@ -164,7 +216,35 @@ export async function buildAuthTransaction(
     smartAccountAuthEntryXdr: auth.smartAccountAuthEntryXdr,
     gAddressPreimageXdr: auth.gAddressPreimageXdr,
     gAddressEntryTemplateXdr: auth.gAddressEntryTemplateXdr,
+    submitMethod: useBundlerDelegatedAuth
+      ? canServerSignDelegatedG(authDelegatedG)
+        ? "bundler-delegated"
+        : "delegated"
+      : signerType === "freighter"
+        ? "delegated"
+        : "webauthn",
+    delegatedAuthG: useBundlerDelegatedAuth ? authDelegatedG : undefined,
   };
+}
+
+/** Aquarius router: swap_chained(user, chain, tokenIn, amountIn, amountOutMin). */
+export function buildSwapChainedOperation(
+  smartAccountAddress: string,
+  swapChainXdr: string,
+  tokenInContractId: string,
+  amountInRaw: bigint,
+  amountOutMinRaw: bigint
+): (router: Contract) => Operation {
+  const swapChain = xdr.ScVal.fromXDR(swapChainXdr, "base64");
+  return (router: Contract) =>
+    router.call(
+      "swap_chained",
+      new Address(smartAccountAddress).toScVal(),
+      swapChain,
+      new Address(tokenInContractId).toScVal(),
+      nativeToScVal(amountInRaw, { type: "u128" }),
+      nativeToScVal(amountOutMinRaw, { type: "u128" })
+    ) as Operation;
 }
 
 /** SAC token transfer: transfer(from, to, amount). */

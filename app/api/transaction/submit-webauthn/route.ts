@@ -2,31 +2,43 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   TransactionBuilder,
   Networks,
-  Address,
+  Keypair,
   xdr,
   rpc,
   Transaction,
 } from "@stellar/stellar-sdk";
+import { contextRuleIdsForEntry } from "@/lib/soroban-auth-payload";
+import { buildWebAuthnAuthPayload } from "@/lib/webauthn";
+import {
+  signBundlerDelegatedAuthEntry,
+  isBundlerDelegatedCheckAuthEntry,
+} from "@/lib/bundler-delegated-auth";
 import {
   rebuildTxWithAuthEntries,
   submitWithBundler,
 } from "@/lib/soroban-transaction-submit";
+
+export const maxDuration = 60;
+export const runtime = "nodejs";
 
 /**
  * Submit a transaction with a WebAuthn-signed auth entry.
  *
  * Receives:
  *   txXdr           - base transaction XDR (unsigned envelope)
- *   authEntryXdr    - base64 auth entry with expiration set
+ *   authEntryXdr    - base64 smart-account auth entry with expiration set
  *   sigDataXdr      - hex: WebAuthnSigData XDR bytes from encodeWebAuthnSigData()
  *   keyDataHex      - hex: 65-byte pubkey || credentialId (the signer's key_data)
  *   contextRuleId   - u32: which context rule was used (default: 0)
- *   verifierAddress - the deployed WebAuthn verifier contract address
+ *   authEntriesXdr  - optional full auth entry list (passkey + bundler delegated G)
+ *   smartAccountAuthEntryIndex - index of smart-account row in authEntriesXdr (default 0)
+ *   delegatedGAuthEntrySynthesized - when true, sign bundler delegated entries server-side
  *
  * Flow:
- *   1. Rebuild auth entry with WebAuthn AuthPayload
- *   2. Enforcing-mode simulate (validates signature on-chain)
- *   3. Assemble, fee-payer sign, submit
+ *   1. Rebuild auth entries with WebAuthn AuthPayload on smart-account row
+ *   2. Sign any unsigned bundler delegated __check_auth entries with BUNDLER_SECRET
+ *   3. Enforcing-mode simulate (validates signature on-chain)
+ *   4. Assemble, fee-payer sign, submit
  */
 
 const getConfig = () => ({
@@ -52,13 +64,17 @@ export async function POST(request: NextRequest) {
 
   try {
     const server = new rpc.Server(config.rpcUrl);
+    const body = await request.json();
     const {
       txXdr,
       authEntryXdr,
-      sigDataXdr,    // hex string: WebAuthnSigData XDR bytes
-      keyDataHex,    // hex string: 65-byte pubkey || credentialId
+      sigDataXdr,
+      keyDataHex,
       contextRuleId,
-    } = await request.json();
+      authEntriesXdr,
+      smartAccountAuthEntryIndex: smartAccountIdxRaw,
+      delegatedGAuthEntrySynthesized,
+    } = body;
 
     if (
       !txXdr ||
@@ -82,47 +98,70 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const smartAccountAuthEntryIndex =
+      smartAccountIdxRaw !== undefined && smartAccountIdxRaw !== null
+        ? Number(smartAccountIdxRaw)
+        : 0;
+    if (!Number.isInteger(smartAccountAuthEntryIndex) || smartAccountAuthEntryIndex < 0) {
+      return NextResponse.json(
+        { error: "smartAccountAuthEntryIndex must be a non-negative integer" },
+        { status: 400 }
+      );
+    }
+
     const tx = TransactionBuilder.fromXDR(txXdr, config.networkPassphrase) as Transaction;
-    const authEntry = xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, "base64");
+
+    const entries: xdr.SorobanAuthorizationEntry[] =
+      Array.isArray(authEntriesXdr) && authEntriesXdr.length > 0
+        ? authEntriesXdr.map((xdrB64: string) =>
+            xdr.SorobanAuthorizationEntry.fromXDR(xdrB64, "base64")
+          )
+        : [xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, "base64")];
+
+    if (smartAccountAuthEntryIndex >= entries.length) {
+      return NextResponse.json(
+        { error: "smartAccountAuthEntryIndex is out of range for authEntriesXdr." },
+        { status: 400 }
+      );
+    }
 
     const sigDataBytes = Buffer.from(sigDataXdr, "hex");
     const keyDataBytes = Buffer.from(keyDataHex, "hex");
 
-    // Build the AuthPayload ScVal:
-    //   AuthPayload {
-    //     context_rule_ids: [contextRuleId],
-    //     signers: { External(verifier, keyData) => sigDataXdr }
-    //   }
-    const signerKey = xdr.ScVal.scvVec([
-      xdr.ScVal.scvSymbol("External"),
-      xdr.ScVal.scvAddress(
-        Address.fromString(config.webauthnVerifierAddress).toScAddress()
-      ),
-      xdr.ScVal.scvBytes(keyDataBytes),
-    ]);
+    const smartAccountEntry = entries[smartAccountAuthEntryIndex];
+    const contextRuleIds = contextRuleIdsForEntry(smartAccountEntry, ruleId);
+    const authPayload = buildWebAuthnAuthPayload(
+      config.webauthnVerifierAddress,
+      keyDataBytes,
+      sigDataBytes,
+      contextRuleIds
+    );
+    smartAccountEntry.credentials().address().signature(authPayload);
+    entries[smartAccountAuthEntryIndex] = smartAccountEntry;
 
-    const authPayload = xdr.ScVal.scvMap([
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("context_rule_ids"),
-        val: xdr.ScVal.scvVec([xdr.ScVal.scvU32(ruleId)]),
-      }),
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("signers"),
-        val: xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: signerKey,
-            val: xdr.ScVal.scvBytes(sigDataBytes),
-          }),
-        ]),
-      }),
-    ]);
+    const bundlerKeypair = Keypair.fromSecret(config.bundlerSecret);
+    const bundlerPublicKey = bundlerKeypair.publicKey();
 
-    const credentials = authEntry.credentials().address();
-    credentials.signature(authPayload);
+    const shouldSignBundler =
+      delegatedGAuthEntrySynthesized === true ||
+      entries.some((e) => isBundlerDelegatedCheckAuthEntry(e, bundlerPublicKey));
+
+    if (shouldSignBundler) {
+      for (let i = 0; i < entries.length; i++) {
+        if (i === smartAccountAuthEntryIndex) continue;
+        if (isBundlerDelegatedCheckAuthEntry(entries[i], bundlerPublicKey)) {
+          entries[i] = signBundlerDelegatedAuthEntry(
+            entries[i],
+            bundlerKeypair,
+            config.networkPassphrase
+          );
+        }
+      }
+    }
 
     let txWithAuth: Transaction;
     try {
-      txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, [authEntry]);
+      txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, entries);
     } catch (e) {
       return NextResponse.json(
         {
