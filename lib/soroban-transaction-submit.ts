@@ -39,25 +39,40 @@ export type SubmitAssembledParams = {
   pollAttempts?: number;
   /** Ms between getTransaction polls (default 500). */
   pollIntervalMs?: number;
+  /**
+   * Max times to re-fetch the bundler sequence and re-assemble/re-sign when the
+   * network rejects the send with tx_bad_seq (default 3).
+   */
+  badSeqRetries?: number;
 };
+
+/** True when an RPC send failure was caused by a stale source-account sequence. */
+function isBadSeqError(errorResult: xdr.TransactionResult | undefined): boolean {
+  if (!errorResult) return false;
+  try {
+    return errorResult.result().switch().name === "txBadSeq";
+  } catch {
+    return false;
+  }
+}
 
 export type SubmitAssembledResult = {
   hash: string;
   status: "SUCCESS" | "PENDING";
 };
 
-export async function submitWithBundler(
-  params: SubmitAssembledParams
-): Promise<SubmitAssembledResult> {
-  const {
-    server,
-    networkPassphrase,
-    bundlerSecret,
-    txWithAuth,
-    pollAttempts = 20,
-    pollIntervalMs = 500,
-  } = params;
-
+/**
+ * Refresh sequence, enforcing-simulate, assemble, and fee-payer sign with the
+ * bundler — but do NOT broadcast. Returns the submit-ready signed transaction
+ * so a caller (e.g. a dApp) can send it via RPC itself (submit=false flow).
+ */
+export async function assembleSignedTxWithBundler(params: {
+  server: rpc.Server;
+  networkPassphrase: string;
+  bundlerSecret: string;
+  txWithAuth: Transaction;
+}): Promise<{ signedTxXdr: string; hash: string }> {
+  const { server, networkPassphrase, bundlerSecret, txWithAuth } = params;
   const bundlerKeypair = Keypair.fromSecret(bundlerSecret);
 
   const txFresh = await refreshBundlerSequence(
@@ -83,10 +98,59 @@ export async function submitWithBundler(
   await getBundlerAccount(server, bundlerKeypair);
   assembledTx.sign(bundlerKeypair);
 
-  const sendResult = await server.sendTransaction(assembledTx);
-  if (sendResult.status === "ERROR") {
+  return {
+    signedTxXdr: assembledTx.toXDR(),
+    hash: assembledTx.hash().toString("hex"),
+  };
+}
+
+export async function submitWithBundler(
+  params: SubmitAssembledParams
+): Promise<SubmitAssembledResult> {
+  const {
+    server,
+    networkPassphrase,
+    bundlerSecret,
+    txWithAuth,
+    pollAttempts = 20,
+    pollIntervalMs = 500,
+    badSeqRetries = 3,
+  } = params;
+
+  // Assemble + fee-payer sign with a fresh bundler sequence, then broadcast.
+  // The bundler sequence can advance between assembly and broadcast (concurrent
+  // submits, a prior in-flight tx). On tx_bad_seq we re-fetch the sequence and
+  // re-assemble/re-sign before failing, since the signed sequence is immutable.
+  let sendResult: Awaited<ReturnType<typeof server.sendTransaction>> | undefined;
+  for (let attempt = 0; attempt <= badSeqRetries; attempt++) {
+    const { signedTxXdr } = await assembleSignedTxWithBundler({
+      server,
+      networkPassphrase,
+      bundlerSecret,
+      txWithAuth,
+    });
+    const assembledTx = TransactionBuilder.fromXDR(
+      signedTxXdr,
+      networkPassphrase
+    ) as Transaction;
+
+    sendResult = await server.sendTransaction(assembledTx);
+    if (sendResult.status !== "ERROR") break;
+
+    if (isBadSeqError(sendResult.errorResult) && attempt < badSeqRetries) {
+      // Brief backoff so any in-flight bundler tx settles before we re-fetch seq.
+      await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+      continue;
+    }
+
     throw new Error(
       `Transaction submission failed: ${decodeTxResultError(sendResult.errorResult)}`
+    );
+  }
+
+  if (!sendResult || sendResult.status === "ERROR") {
+    throw new Error(
+      `Transaction submission failed: ${decodeTxResultError(sendResult?.errorResult)}`
     );
   }
 

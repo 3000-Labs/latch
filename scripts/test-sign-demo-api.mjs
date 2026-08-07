@@ -90,7 +90,7 @@ async function main() {
     callback,
     requestId,
     origin: BASE,
-    submit: true,
+    submit: false,
   });
 
   console.log("sign-payload POST:", storeRes.status);

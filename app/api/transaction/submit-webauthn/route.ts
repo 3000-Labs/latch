@@ -14,6 +14,7 @@ import {
   isBundlerDelegatedCheckAuthEntry,
 } from "@/lib/bundler-delegated-auth";
 import {
+  assembleSignedTxWithBundler,
   rebuildTxWithAuthEntries,
   submitWithBundler,
 } from "@/lib/soroban-transaction-submit";
@@ -74,6 +75,7 @@ export async function POST(request: NextRequest) {
       authEntriesXdr,
       smartAccountAuthEntryIndex: smartAccountIdxRaw,
       delegatedGAuthEntrySynthesized,
+      submit,
     } = body;
 
     if (
@@ -175,6 +177,16 @@ export async function POST(request: NextRequest) {
     }
 
     try {
+      // submit === false: sign + assemble, return signed tx XDR for dApp RPC submit.
+      if (submit === false) {
+        const { signedTxXdr } = await assembleSignedTxWithBundler({
+          server,
+          networkPassphrase: config.networkPassphrase,
+          bundlerSecret: config.bundlerSecret,
+          txWithAuth,
+        });
+        return NextResponse.json({ signedTxXdr, submitted: false });
+      }
       const { hash: txHash, status } = await submitWithBundler({
         server,
         networkPassphrase: config.networkPassphrase,

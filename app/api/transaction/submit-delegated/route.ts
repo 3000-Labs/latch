@@ -20,6 +20,7 @@ import { addressStringFromCredentials, isUnsignedAddressAuthEntry } from "@/lib/
 import { delegatedCheckAuthArgHex } from "@/lib/delegated-check-auth-entry";
 import { getBundlerKeypair, resolveSignerKeypairForG } from "@/lib/bundler-config";
 import {
+  assembleSignedTxWithBundler,
   rebuildTxWithAuthEntries,
   submitWithBundler,
 } from "@/lib/soroban-transaction-submit";
@@ -141,6 +142,7 @@ export async function POST(request: NextRequest) {
       smartAccountAuthEntryIndex: smartAccountIdxRaw,
       delegatedGAuthEntrySynthesized,
       contextRuleId,
+      submit,
     } = body;
 
     if (!txXdr || !smartAccountAuthEntryXdr) {
@@ -149,6 +151,27 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // When submit === false, sign + assemble but return the signed tx XDR
+    // instead of broadcasting, so the dApp can submit via RPC itself.
+    const finalize = async (txWithAuth: Transaction) => {
+      if (submit === false) {
+        const { signedTxXdr } = await assembleSignedTxWithBundler({
+          server,
+          networkPassphrase: config.networkPassphrase,
+          bundlerSecret: config.bundlerSecret!,
+          txWithAuth,
+        });
+        return NextResponse.json({ signedTxXdr, submitted: false });
+      }
+      const { hash, status } = await submitWithBundler({
+        server,
+        networkPassphrase: config.networkPassphrase,
+        bundlerSecret: config.bundlerSecret!,
+        txWithAuth,
+      });
+      return NextResponse.json({ hash, status });
+    };
 
     const smartAccountAuthEntryIndex =
       smartAccountIdxRaw !== undefined && smartAccountIdxRaw !== null
@@ -224,13 +247,7 @@ export async function POST(request: NextRequest) {
         );
 
         const txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, entries);
-        const { hash, status } = await submitWithBundler({
-          server,
-          networkPassphrase: config.networkPassphrase,
-          bundlerSecret: config.bundlerSecret,
-          txWithAuth,
-        });
-        return NextResponse.json({ hash, status });
+        return finalize(txWithAuth);
       }
 
       if (!gAddressEntryTemplateXdr || !signedAuthEntryBase64 || !signerAddress) {
@@ -296,13 +313,7 @@ export async function POST(request: NextRequest) {
       }
 
       const txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, entries);
-      const { hash, status } = await submitWithBundler({
-        server,
-        networkPassphrase: config.networkPassphrase,
-        bundlerSecret: config.bundlerSecret,
-        txWithAuth,
-      });
-      return NextResponse.json({ hash, status });
+      return finalize(txWithAuth);
     }
 
     if (!gAddressEntryTemplateXdr || !signedAuthEntryBase64 || !signerAddress) {
@@ -390,14 +401,7 @@ export async function POST(request: NextRequest) {
     }
 
     const txWithAuth = rebuildTxWithAuthEntries(tx, config.networkPassphrase, entries);
-    const { hash: txHash, status } = await submitWithBundler({
-      server,
-      networkPassphrase: config.networkPassphrase,
-      bundlerSecret: config.bundlerSecret,
-      txWithAuth,
-    });
-
-    return NextResponse.json({ hash: txHash, status });
+    return finalize(txWithAuth);
   } catch (error) {
     console.error("Error submitting delegated transaction:", error);
     const msg = error instanceof Error ? error.message : "Failed to submit transaction";

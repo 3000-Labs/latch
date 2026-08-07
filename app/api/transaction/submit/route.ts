@@ -16,6 +16,7 @@ import {
   hashSorobanAuthPayload,
 } from "@/lib/soroban-auth-payload";
 import {
+  assembleSignedTxWithBundler,
   rebuildTxWithAuthEntries,
   submitWithBundler,
 } from "@/lib/soroban-transaction-submit";
@@ -60,6 +61,7 @@ export async function POST(request: NextRequest) {
       prefixedMessage,    // The full message that was signed (PREFIX + hex(payload))
       publicKeyHex,
       contextRuleId,
+      submit,
     } = await request.json();
 
     if (
@@ -304,6 +306,17 @@ export async function POST(request: NextRequest) {
 
     if (!rpc.Api.isSimulationSuccess(enforcingSim)) {
       throw new Error("Enforcing simulation did not succeed");
+    }
+
+    // submit === false: sign + assemble, return signed tx XDR for dApp RPC submit.
+    if (submit === false) {
+      const { signedTxXdr } = await assembleSignedTxWithBundler({
+        server,
+        networkPassphrase: TESTNET_CONFIG.networkPassphrase,
+        bundlerSecret: TESTNET_CONFIG.bundlerSecret,
+        txWithAuth,
+      });
+      return NextResponse.json({ signedTxXdr, submitted: false });
     }
 
     const { hash: txHash, status } = await submitWithBundler({
