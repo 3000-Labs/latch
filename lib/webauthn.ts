@@ -223,6 +223,21 @@ export function buildKeyData(publicKey: Uint8Array, credentialId: string): Buffe
   return Buffer.concat([Buffer.from(publicKey), b64uDecode(credentialId)]);
 }
 
+/**
+ * Recover the WebAuthn credential id (base64url) from on-chain key_data hex.
+ * keyData = 65-byte uncompressed P-256 pubkey || credentialId bytes.
+ */
+export function credentialIdFromKeyDataHex(keyDataHex: string): string {
+  const hex = keyDataHex.trim().replace(/^0x/i, "");
+  const buf = Buffer.from(hex, "hex");
+  if (buf.length <= 65 || buf[0] !== 0x04) {
+    throw new Error(
+      "Invalid keyDataHex: expected 65-byte 0x04 pubkey + credential id bytes."
+    );
+  }
+  return b64uEncode(buf.subarray(65));
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 function generateChallenge(): string {

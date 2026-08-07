@@ -59,6 +59,9 @@ model WebauthnCredential {
   deviceType String? @map("device_type")
   backedUp   Int     @default(0) @map("backed_up")
 
+  /// WebAuthn user.id handle issued at registration begin (not the HTTP session userId).
+  webauthnUserHandle String? @map("webauthn_user_handle")
+
   createdAt BigInt @map("created_at")
 
   user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -96,6 +99,8 @@ model WebauthnChallenge {
   challenge String
   rpId      String  @map("rp_id")
   origin    String
+  /// WebAuthn user.id handle for registration ceremonies (copied onto credential at finish).
+  webauthnUserHandle String? @map("webauthn_user_handle")
   expiresAt BigInt  @map("expires_at")
   createdAt BigInt  @map("created_at")
 

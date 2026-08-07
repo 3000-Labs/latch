@@ -1,4 +1,4 @@
-import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
+import { generateAuthenticationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/types";
 import * as crypto from "crypto";
 import { prisma } from "@/lib/prisma";
@@ -9,9 +9,9 @@ import {
   getOriginFromClientDataJSON,
   resolveWebauthnCeremonyContext,
   resolveWebauthnFinishVerification,
-  stableUserIdBytes,
   WebauthnCeremonyConfigError,
 } from "@/lib/webauthn-server";
+import { buildRegistrationOptions } from "@/lib/webauthn-registration-options";
 import { extractCredentialIdFromKeyDataHex } from "@/lib/multisig-draft";
 import { getOrCreateSession } from "@/lib/session";
 
@@ -32,52 +32,13 @@ export async function beginDraftWebauthnRegistration(args: {
   displayName?: string;
   chromeExtensionId?: string;
 }): Promise<{ options: PublicKeyCredentialCreationOptionsJSON }> {
-  const body = { chromeExtensionId: args.chromeExtensionId, displayName: args.displayName };
-  let rpID: string;
-  let expectedOrigin: string;
-  try {
-    ({ rpId: rpID, origin: expectedOrigin } = resolveWebauthnCeremonyContext(
-      args.request,
-      body.chromeExtensionId
-    ));
-  } catch (e) {
-    if (e instanceof WebauthnCeremonyConfigError) throw e;
-    throw e;
-  }
-
-  const options = (await generateRegistrationOptions({
-    rpID,
-    rpName: "Latch",
-    userID: stableUserIdBytes(args.challengeUserId),
-    userName: body.displayName || "multisig-member",
-    attestationType: "none",
-    authenticatorSelection: {
-      residentKey: "preferred",
-      userVerification: "preferred",
-    },
-    supportedAlgorithmIDs: [-7],
-    timeout: 60_000,
-  })) as PublicKeyCredentialCreationOptionsJSON;
-
-  if (!options?.challenge) {
-    throw new Error("WebAuthn registration options missing challenge");
-  }
-
-  const issuedRpId = typeof options.rp?.id === "string" ? options.rp.id : rpID;
-  const now = nowMs();
-  await prisma.webauthnChallenge.create({
-    data: {
-      id: crypto.randomUUID(),
-      userId: args.challengeUserId,
-      purpose: draftRegisterPurpose(args.draftId),
-      challenge: options.challenge,
-      rpId: issuedRpId,
-      origin: expectedOrigin,
-      expiresAt: BigInt(now + CHALLENGE_TTL_MS),
-      createdAt: BigInt(now),
-    },
+  const { options } = await buildRegistrationOptions({
+    request: args.request,
+    sessionUserId: args.challengeUserId,
+    displayName: args.displayName,
+    chromeExtensionId: args.chromeExtensionId,
+    challengePurpose: draftRegisterPurpose(args.draftId),
   });
-
   return { options };
 }
 
@@ -95,7 +56,14 @@ export async function finishDraftWebauthnRegistration(args: {
   const challengeRow = await prisma.webauthnChallenge.findFirst({
     where: { userId: args.challengeUserId, purpose },
     orderBy: { createdAt: "desc" },
-    select: { id: true, challenge: true, expiresAt: true, rpId: true, origin: true },
+    select: {
+      id: true,
+      challenge: true,
+      expiresAt: true,
+      rpId: true,
+      origin: true,
+      webauthnUserHandle: true,
+    },
   });
 
   if (!challengeRow || challengeRow.expiresAt <= BigInt(now)) {
@@ -156,6 +124,7 @@ export async function finishDraftWebauthnRegistration(args: {
         transports,
         deviceType: credentialDeviceType,
         backedUp: credentialBackedUp ? 1 : 0,
+        webauthnUserHandle: challengeRow.webauthnUserHandle,
         createdAt: BigInt(now),
       },
       update: {
@@ -167,6 +136,9 @@ export async function finishDraftWebauthnRegistration(args: {
         transports,
         deviceType: credentialDeviceType,
         backedUp: credentialBackedUp ? 1 : 0,
+        ...(challengeRow.webauthnUserHandle
+          ? { webauthnUserHandle: challengeRow.webauthnUserHandle }
+          : {}),
       },
     });
   }
