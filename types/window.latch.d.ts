@@ -11,6 +11,13 @@ export interface OpenSignRequestParams {
   origin?: string;
 }
 
+export type LatchAccountChangedPayload = {
+  publicKey: string;
+  network: Network;
+};
+
+export type LatchProviderEventName = "accountChanged" | "networkChanged";
+
 export interface LatchProvider {
   isConnected(): Promise<boolean>;
   getPublicKey(): Promise<string>;
@@ -19,6 +26,7 @@ export interface LatchProvider {
     xdr: string;
     network: Network;
     accountToSign: string;
+    submit?: boolean;
   }): Promise<{
     txHash?: string;
     signedAuthEntry?: string;
@@ -26,6 +34,14 @@ export interface LatchProvider {
     signedXdr?: string;
   }>;
   openSignRequest(params: OpenSignRequestParams): Promise<void>;
+  on?(
+    event: LatchProviderEventName,
+    handler: (payload: LatchAccountChangedPayload) => void
+  ): void;
+  off?(
+    event: LatchProviderEventName,
+    handler: (payload: LatchAccountChangedPayload) => void
+  ): void;
 }
 
 declare global {

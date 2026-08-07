@@ -8,17 +8,20 @@ function truncateAddress(addr: string): string {
 }
 
 export function ConnectWalletBar() {
-  const { status, publicKey, network, error, connect, disconnect } = useLatchWallet();
+  const { status, publicKey, network, error, connect, disconnect, refreshAccount } =
+    useLatchWallet();
 
   return (
-    <div className="rounded border bg-muted/30 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-medium">Latch Wallet</span>
+    <div className="rounded-2xl border border-border bg-background/80 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3 shadow-sm">
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+          Latch Wallet
+        </span>
 
         {status === "no_extension" && (
           <span className="text-xs text-muted-foreground max-w-md">
-            Extension not detected — load unpacked latch-web-extension (with provider-bridge fix),
-            reload this page
+            Extension not detected — rebuild/reload unpacked latch-web-extension, then hard-refresh
+            this page
           </span>
         )}
 
@@ -26,7 +29,7 @@ export function ConnectWalletBar() {
           <button
             type="button"
             onClick={() => void connect()}
-            className="rounded bg-black text-white px-3 py-1.5 text-sm font-medium"
+            className="rounded-xl bg-primary px-3 py-1.5 text-sm font-mono font-medium text-primary-foreground"
           >
             Connect Wallet
           </button>
@@ -57,19 +60,32 @@ export function ConnectWalletBar() {
           <button
             type="button"
             onClick={() => void connect()}
-            className="text-sm underline"
+            className="text-sm underline text-muted-foreground"
           >
             Retry
           </button>
         )}
 
         {status === "connected" && (
-          <button type="button" onClick={disconnect} className="text-sm underline">
-            Disconnect
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => void refreshAccount()}
+              className="text-sm underline text-muted-foreground"
+              title="Re-read the active account from the Latch extension"
+            >
+              Sync account
+            </button>
+            <button
+              type="button"
+              onClick={disconnect}
+              className="text-sm underline text-muted-foreground"
+            >
+              Disconnect
+            </button>
+          </>
         )}
       </div>
     </div>
   );
 }
-

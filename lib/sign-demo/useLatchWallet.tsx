@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -16,17 +17,19 @@ import {
   LatchWalletError,
 } from "./latchWallet";
 
-const STORAGE_KEY = "latch.signDemo.walletSession";
+const DEFAULT_STORAGE_KEY = "latch.signDemo.walletSession";
 
 type LatchWalletContextValue = WalletConnectionState & {
   connect: () => Promise<{ publicKey: string; network: WalletConnectionState["network"] } | undefined>;
   disconnect: () => void;
   refreshProbe: () => Promise<void>;
+  /** Re-read active account from the extension; updates UI when it changed. */
+  refreshAccount: () => Promise<{ publicKey: string; network: WalletConnectionState["network"] } | null>;
 };
 
 const LatchWalletContext = createContext<LatchWalletContextValue | null>(null);
 
-function useLatchWalletState(): LatchWalletContextValue {
+function useLatchWalletState(storageKey: string): LatchWalletContextValue {
   const [state, setState] = useState<WalletConnectionState>({
     status: "disconnected",
     publicKey: null,
@@ -35,10 +38,14 @@ function useLatchWalletState(): LatchWalletContextValue {
     error: null,
     connectedAt: null,
   });
+  const statusRef = useRef(state.status);
+  statusRef.current = state.status;
+  const storageKeyRef = useRef(storageKey);
+  storageKeyRef.current = storageKey;
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(storageKey);
       if (!raw) return;
       const saved = JSON.parse(raw) as { publicKey: string; network: string };
       setState((s) => ({
@@ -50,7 +57,7 @@ function useLatchWalletState(): LatchWalletContextValue {
     } catch {
       // ignore
     }
-  }, []);
+  }, [storageKey]);
 
   const refreshProbe = useCallback(async () => {
     const probe = await probeLatchExtension();
@@ -71,6 +78,55 @@ function useLatchWalletState(): LatchWalletContextValue {
     return () => clearInterval(id);
   }, [state.status, refreshProbe]);
 
+  const applyConnected = useCallback(
+    (publicKey: string, network: WalletConnectionState["network"]) => {
+      const connectedAt = new Date().toISOString();
+      localStorage.setItem(
+        storageKeyRef.current,
+        JSON.stringify({ publicKey, network })
+      );
+      setState({
+        status: "connected",
+        publicKey,
+        network,
+        origin: window.location.origin,
+        error: null,
+        connectedAt,
+      });
+    },
+    []
+  );
+
+  const refreshAccount = useCallback(async () => {
+    if (!isLatchInjected()) return null;
+    if (statusRef.current !== "connected" && statusRef.current !== "connecting") {
+      return null;
+    }
+    try {
+      const { publicKey, network } = await connectLatchWallet();
+      setState((prev) => {
+        if (prev.publicKey === publicKey && prev.network === network && prev.status === "connected") {
+          return prev;
+        }
+        localStorage.setItem(
+          storageKeyRef.current,
+          JSON.stringify({ publicKey, network })
+        );
+        return {
+          status: "connected",
+          publicKey,
+          network,
+          origin: typeof window !== "undefined" ? window.location.origin : prev.origin,
+          error: null,
+          connectedAt: prev.connectedAt ?? new Date().toISOString(),
+        };
+      });
+      return { publicKey, network };
+    } catch {
+      return null;
+    }
+  }, []);
+
   const connect = useCallback(async () => {
     if (!isLatchInjected()) {
       setState((s) => ({
@@ -83,16 +139,7 @@ function useLatchWalletState(): LatchWalletContextValue {
     setState((s) => ({ ...s, status: "connecting", error: null }));
     try {
       const { publicKey, network } = await connectLatchWallet();
-      const connectedAt = new Date().toISOString();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ publicKey, network }));
-      setState({
-        status: "connected",
-        publicKey,
-        network,
-        origin: window.location.origin,
-        error: null,
-        connectedAt,
-      });
+      applyConnected(publicKey, network);
       return { publicKey, network };
     } catch (e) {
       const message =
@@ -108,10 +155,10 @@ function useLatchWalletState(): LatchWalletContextValue {
       }));
       throw e;
     }
-  }, []);
+  }, [applyConnected]);
 
   const disconnect = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(storageKeyRef.current);
     setState({
       status: isLatchInjected() ? "disconnected" : "no_extension",
       publicKey: null,
@@ -122,11 +169,62 @@ function useLatchWalletState(): LatchWalletContextValue {
     });
   }, []);
 
-  return { ...state, connect, disconnect, refreshProbe };
+  // Provider accountChanged / networkChanged (requires rebuilt extension inpage)
+  useEffect(() => {
+    const latch = typeof window !== "undefined" ? window.latch : undefined;
+    if (!latch?.on) return;
+
+    const onAccount = (payload: {
+      publicKey: string;
+      network: WalletConnectionState["network"];
+    }) => {
+      if (statusRef.current !== "connected" && statusRef.current !== "connecting") return;
+      applyConnected(payload.publicKey, payload.network);
+    };
+
+    latch.on("accountChanged", onAccount);
+    latch.on("networkChanged", onAccount);
+    return () => {
+      latch.off?.("accountChanged", onAccount);
+      latch.off?.("networkChanged", onAccount);
+    };
+  }, [applyConnected]);
+
+  // Popup account switches do not blur the dApp tab — poll while connected.
+  useEffect(() => {
+    if (state.status !== "connected") return;
+    const id = window.setInterval(() => {
+      void refreshAccount();
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [state.status, refreshAccount]);
+
+  // Focus / visibility safety net
+  useEffect(() => {
+    if (state.status !== "connected") return;
+    const onFocus = () => {
+      void refreshAccount();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [state.status, refreshAccount]);
+
+  return { ...state, connect, disconnect, refreshProbe, refreshAccount };
 }
 
-export function LatchWalletProvider({ children }: { children: ReactNode }) {
-  const value = useLatchWalletState();
+export function LatchWalletProvider({
+  children,
+  storageKey = DEFAULT_STORAGE_KEY,
+}: {
+  children: ReactNode;
+  /** Isolate session persistence per dapp (default: sign-demo key). */
+  storageKey?: string;
+}) {
+  const value = useLatchWalletState(storageKey);
   return (
     <LatchWalletContext.Provider value={value}>{children}</LatchWalletContext.Provider>
   );

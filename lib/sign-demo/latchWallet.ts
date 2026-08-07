@@ -14,12 +14,20 @@ export class LatchWalletError extends Error {
   }
 }
 
-interface LatchProvider {
+export interface LatchProvider {
   isConnected(): Promise<boolean>;
   getPublicKey(): Promise<string>;
   getNetwork(): Promise<Network>;
   signTransaction(request: SignTransactionRequest): Promise<SignTransactionResponse>;
   openSignRequest?(params: OpenSignRequestParams): Promise<void>;
+  on?(
+    event: "accountChanged" | "networkChanged",
+    handler: (payload: { publicKey: string; network: Network }) => void
+  ): void;
+  off?(
+    event: "accountChanged" | "networkChanged",
+    handler: (payload: { publicKey: string; network: Network }) => void
+  ): void;
 }
 
 export function isLatchInjected(): boolean {
@@ -82,7 +90,30 @@ export async function signWithLatch(
   request: SignTransactionRequest
 ): Promise<SignTransactionResponse> {
   try {
-    return await requireLatch().signTransaction(request);
+    const latch = requireLatch();
+    // Extension gates signTransaction on a prior getPublicKey for this origin.
+    // Always re-assert the *live* active account before signing.
+    const publicKey = (await latch.getPublicKey())?.trim();
+    if (!publicKey) {
+      throw new LatchWalletError(
+        "Could not determine the active Latch account to sign with.",
+        "no_account"
+      );
+    }
+
+    const requested = request.accountToSign?.trim();
+    if (requested && requested !== publicKey) {
+      throw new LatchWalletError(
+        `Active Latch account is ${publicKey.slice(0, 6)}…${publicKey.slice(-4)}, but this transaction was built for ${requested.slice(0, 6)}…${requested.slice(-4)}. Switch the wallet back to that account, or reconnect and rebuild.`,
+        "account_mismatch"
+      );
+    }
+
+    return await latch.signTransaction({
+      ...request,
+      accountToSign: publicKey,
+      submit: request.submit,
+    });
   } catch (e) {
     wrapError(e);
   }

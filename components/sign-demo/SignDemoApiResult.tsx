@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { PrepareSignResponse } from "@/lib/sign-demo/types";
 import { SignDemoApiError } from "@/lib/sign-demo/api";
+import { isMissingContextRuleError } from "@/lib/context-rule-setup";
 
 interface SignDemoApiResultProps {
   title: string;
@@ -10,16 +11,43 @@ interface SignDemoApiResultProps {
   error?: SignDemoApiError | Error | null;
 }
 
+function actionableHint(error: SignDemoApiError | Error): string | null {
+  if (!(error instanceof SignDemoApiError) && error.name !== "SignDemoApiError") {
+    return null;
+  }
+  const apiErr = error as SignDemoApiError;
+  if (
+    isMissingContextRuleError(
+      apiErr.status,
+      apiErr.code,
+      apiErr.suggestedAction
+    ) ||
+    apiErr.suggestedAction === "setup_transfer_rule"
+  ) {
+    return "Missing CallContract send rule on-chain. Rebuild to auto-run setup-send-rules (you must approve the passkey/wallet prompt). Hitting setup-send-rules alone only builds the tx — it must be signed and submitted.";
+  }
+  if (apiErr.suggestedAction === "setup_swap_rule") {
+    return "Run setup-swap-rules for this account, then retry.";
+  }
+  return null;
+}
+
 export function SignDemoApiResult({ title, result, error }: SignDemoApiResultProps) {
   const [showRaw, setShowRaw] = useState(false);
 
   if (error) {
     const code = error instanceof SignDemoApiError ? error.code : "error";
+    const hint = actionableHint(error);
     return (
-      <div className="rounded border border-destructive/50 bg-destructive/5 p-3 space-y-1">
+      <div className="rounded-xl border border-destructive/50 bg-destructive/5 p-3 space-y-2">
         <p className="text-sm font-medium text-destructive">{title} failed</p>
         <p className="text-xs font-mono text-destructive/80">code: {code}</p>
         <p className="text-sm text-destructive/90">{error.message}</p>
+        {hint && (
+          <p className="text-sm text-amber-800 dark:text-amber-300 border-t border-destructive/20 pt-2">
+            {hint}
+          </p>
+        )}
       </div>
     );
   }
@@ -31,7 +59,7 @@ export function SignDemoApiResult({ title, result, error }: SignDemoApiResultPro
   const hasOperations = Array.isArray(operations) && operations.length > 0;
 
   return (
-    <div className="rounded border bg-muted/30 p-3 space-y-3">
+    <div className="rounded-xl border bg-muted/30 p-3 space-y-3">
       <p className="text-sm font-medium">{title} — success</p>
 
       {hasOperations && (
@@ -87,7 +115,7 @@ export function SignDemoApiResult({ title, result, error }: SignDemoApiResultPro
       </button>
 
       {showRaw && (
-        <pre className="text-xs font-mono overflow-auto max-h-64 bg-background rounded p-2 border">
+        <pre className="text-xs font-mono overflow-auto max-h-64 bg-background rounded-lg p-2 border">
           {JSON.stringify(result, null, 2)}
         </pre>
       )}

@@ -17,6 +17,29 @@ export interface BuildSignDemoResponse {
   smartAccountAddress: string;
 }
 
+/** Go latch-backend build-send request (Section B2). */
+export interface BuildSendRemoteRequest {
+  smartAccountAddress: string;
+  signerType: "passkey" | "phantom" | "freighter";
+  recipient: string;
+  amount: string;
+  assetId?: string;
+  contractId?: string;
+  signerG?: string;
+  publicKeyHex?: string;
+  keyDataHex?: string;
+}
+
+export interface BuildSendRemoteResponse {
+  txXdr?: string;
+  authEntryXdr?: string;
+  authDigestHex?: string;
+  contextRuleId?: number | string;
+  validUntilLedger?: number;
+  estimatedFeeXlm?: string;
+  [key: string]: unknown;
+}
+
 export interface PrepareSignRequest {
   network: Network;
   smartAccountAddress: string;
@@ -71,6 +94,11 @@ export interface SignTransactionRequest {
   xdr: string;
   network: Network;
   accountToSign: string;
+  /**
+   * When false, the extension may return signed auth material instead of
+   * submitting. The dApp can then submit via backend submit endpoints.
+   */
+  submit?: boolean;
 }
 
 export interface SignTransactionResponse {
@@ -100,6 +128,8 @@ export interface SignCallbackResult {
   code?: string;
   message?: string;
   signedAuthEntry?: string;
+  /** Present when the wallet used submit=false; a submit-ready signed tx envelope. */
+  signedTxXdr?: string;
 }
 
 export type WalletConnectionStatus =
