@@ -99,6 +99,9 @@ export async function POST(request: NextRequest) {
         status: error.status,
         code: error.code,
         message: error.message,
+        ...(error.code === "NO_CONTEXT_RULE"
+          ? { suggestedAction: "setup_transfer_rule" }
+          : {}),
       });
     }
     console.error("prepare-sign error:", error);

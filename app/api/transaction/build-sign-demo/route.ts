@@ -96,6 +96,22 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      // Same gate as transfer so the demo client can auto-run setup-send-rules then retry.
+      const { discovery } = await discoverContextRule(
+        server,
+        networkPassphrase,
+        smartAccountAddress,
+        asset.contractId
+      );
+      if (!hasMatchedCallContractRule(discovery)) {
+        return apiError({
+          status: 409,
+          code: "NO_CONTEXT_RULE",
+          message: `No context rule allows CallContract(${asset.contractId}). Run setup-send-rules first.`,
+          suggestedAction: "setup_transfer_rule",
+        });
+      }
+
       const tx = await buildUnsignedSorobanTransaction({
         server,
         networkPassphrase,
@@ -153,9 +169,10 @@ export async function POST(request: NextRequest) {
       );
       if (!hasMatchedCallContractRule(discovery)) {
         return apiError({
-          status: 400,
-          code: "context_rule_missing",
+          status: 409,
+          code: "NO_CONTEXT_RULE",
           message: `No context rule allows CallContract(${asset.contractId}). Run setup-send-rules first.`,
+          suggestedAction: "setup_transfer_rule",
         });
       }
 
@@ -190,9 +207,10 @@ export async function POST(request: NextRequest) {
     const err = error as Error & { code?: string };
     if (err.code === "NO_CONTEXT_RULE") {
       return apiError({
-        status: 400,
-        code: "context_rule_missing",
+        status: 409,
+        code: "NO_CONTEXT_RULE",
         message: err.message,
+        suggestedAction: "setup_transfer_rule",
       });
     }
     if (error instanceof ApiRequestError) {

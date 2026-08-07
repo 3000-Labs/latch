@@ -28,10 +28,29 @@ export function buildAddContextRuleOperation(
   signersVec: xdr.ScVal,
   namePrefix = "send"
 ): Operation {
+  return buildAddContextRuleForContractOperation(
+    smartAccount,
+    asset.contractId,
+    buildContextRuleName(asset, namePrefix),
+    signersVec
+  );
+}
+
+/** CallContract rule for any Soroban C-address (dapp / non-catalog contracts). */
+export function buildAddContextRuleForContractOperation(
+  smartAccount: Contract,
+  contractId: string,
+  ruleName: string,
+  signersVec: xdr.ScVal
+): Operation {
+  const name =
+    ruleName.length > CONTEXT_RULE_NAME_MAX_LEN
+      ? ruleName.slice(0, CONTEXT_RULE_NAME_MAX_LEN)
+      : ruleName;
   return smartAccount.call(
     "add_context_rule",
-    buildCallContractContextType(asset.contractId),
-    nativeToScVal(buildContextRuleName(asset, namePrefix), { type: "string" }),
+    buildCallContractContextType(contractId),
+    nativeToScVal(name, { type: "string" }),
     xdr.ScVal.scvVoid(),
     signersVec,
     xdr.ScVal.scvMap([])

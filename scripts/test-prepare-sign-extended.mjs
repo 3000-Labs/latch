@@ -102,6 +102,41 @@ async function main() {
   assert(prep.contextRuleId !== undefined, "missing contextRuleId for submit");
   assert(prep.validUntilLedger, "missing validUntilLedger");
 
+  // Admin / self-invoke: setup-send-rules tx must prepare under Default (not CallContract).
+  const setupBody = {
+    smartAccountAddress: smartAccount,
+    signerType: signerG ? "freighter" : "phantom",
+    assetId: asset.assetId,
+    ...(signerG ? { gAddress: signerG } : {}),
+  };
+  const { res: setupRes, data: setup } = await postJson(
+    "/api/smart-account/setup-send-rules",
+    setupBody
+  );
+  console.log("setup-send-rules:", setupRes.status);
+  assert(setupRes.ok, `setup-send-rules failed: ${JSON.stringify(setup)}`);
+  if (setup.alreadyConfigured) {
+    console.log("setup alreadyConfigured — skipping admin prepare-sign check");
+  } else {
+    assert(typeof setup.txXdr === "string", "setup missing txXdr");
+    const { res: adminPrepRes, data: adminPrep } = await postJson(
+      "/api/transaction/prepare-sign",
+      {
+        network: "testnet",
+        smartAccountAddress: smartAccount,
+        unsignedTxXdr: setup.txXdr,
+        signerType: signerG ? "freighter" : "phantom",
+        ...(signerG ? { signerG } : {}),
+      }
+    );
+    console.log("prepare-sign (admin setup tx):", adminPrepRes.status);
+    assert(
+      adminPrepRes.ok,
+      `prepare-sign admin self-invoke failed: ${JSON.stringify(adminPrep)}`
+    );
+    assert(adminPrep.authEntryXdr, "admin prepare missing authEntryXdr");
+  }
+
   console.log("Extended prepare-sign checks passed.");
   console.log("  operation:", prep.operations[0].summary);
   console.log("  contextRuleId:", prep.contextRuleId);

@@ -52,8 +52,9 @@ export async function createCounterIncrementProposal(smartAccountAddress: string
 }
 
 const NO_CONTEXT_RULE_MESSAGE =
-  "This team wallet cannot send this token yet — no matching context rule on-chain. " +
-  "Multisig context-rule setup is not available in this playground.";
+  "This team wallet cannot send this token yet — no matching CallContract context rule on-chain. " +
+  "Run setup-send-rules for this asset on the smart account (with a member signer) before proposing SAC transfers. " +
+  "See LATCH_BACKEND_ECOSYSTEM.md.";
 
 export async function createSacTransferProposal(args: {
   smartAccountAddress: string;
@@ -73,6 +74,7 @@ export async function createSacTransferProposal(args: {
       assetId: args.assetId,
       recipient,
       amount,
+      requireMatchedContextRule: true,
     });
   } catch (e) {
     if (e instanceof MultisigApiError && e.code === "NO_CONTEXT_RULE") {

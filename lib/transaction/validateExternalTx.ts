@@ -85,6 +85,17 @@ export function extractTargetContractId(tx: Transaction): string | null {
 }
 
 /**
+ * True when the first invoke targets the smart account itself (admin ops such as
+ * `add_context_rule`). These use the Default context rule, not CallContract(SAC).
+ */
+export function isSmartAccountSelfInvoke(
+  targetContractId: string,
+  smartAccountAddress: string
+): boolean {
+  return targetContractId === smartAccountAddress;
+}
+
+/**
  * Pre-simulation binding check: invoke source matches smart account, or the
  * smart account contract is the invoke target (ops on the account itself).
  */

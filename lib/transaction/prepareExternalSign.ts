@@ -28,6 +28,7 @@ import {
 } from "@/lib/transaction/parseOperationsForReview";
 import {
   extractTargetContractId,
+  isSmartAccountSelfInvoke,
   parseExternalTransaction,
   preValidateSmartAccountBinding,
 } from "@/lib/transaction/validateExternalTx";
@@ -89,12 +90,18 @@ export async function prepareExternalSign(
   }
 
   const feePayerG = resolveBundlerFeePayerG(req.feePayerG);
+  const isSwap = isSwapRouterContractId(targetContractId);
+  /** Admin / setup txs invoke the smart account (e.g. add_context_rule) under Default. */
+  const isAdminSelfInvoke = isSmartAccountSelfInvoke(
+    targetContractId,
+    req.smartAccountAddress
+  );
 
   let contextRuleId = req.contextRuleId;
   let discovery = req.contextRuleDiscovery;
 
   if (contextRuleId === undefined || discovery === undefined) {
-    if (isSwapRouterContractId(targetContractId)) {
+    if (isSwap || isAdminSelfInvoke) {
       const discovered = await discoverDefaultContextRule(
         server,
         networkPassphrase,
@@ -120,20 +127,20 @@ export async function prepareExternalSign(
     contextRuleId
   );
 
-  if (isSwapRouterContractId(targetContractId)) {
-    const swapAuth = resolveSwapAuthMode({
+  if (isSwap) {
+    const swapAuthPreview = resolveSwapAuthMode({
       rule: swapRule,
       signerType: req.signerType ?? "passkey",
       signerG: req.signerG,
     });
-    if (swapAuth.needsPasskeySetup) {
+    if (swapAuthPreview.needsPasskeySetup) {
       assertSwapRuleReadyForSign({ rule: swapRule, contextRuleId });
     }
   } else if (hasMatchedCallContractRule(discovery)) {
     assertSwapRuleReadyForSign({ rule: swapRule, contextRuleId });
   }
 
-  const swapAuth = isSwapRouterContractId(targetContractId)
+  const swapAuth = isSwap
     ? resolveSwapAuthMode({
         rule: swapRule,
         signerType: req.signerType ?? "passkey",
@@ -152,7 +159,8 @@ export async function prepareExternalSign(
     signerType: req.signerType,
     signerG: swapAuth.useDelegatedAuth ? swapAuth.delegatedAuthG : req.signerG,
     feePayerG,
-    requireMatchedContextRule: !isSwapRouterContractId(targetContractId),
+    // SAC/transfer requires CallContract(target); swap + admin self-invoke use Default.
+    requireMatchedContextRule: !isSwap && !isAdminSelfInvoke,
     bundlerDelegatedAuthMode: swapAuth.useDelegatedAuth,
     delegatedAuthG: swapAuth.delegatedAuthG,
   });
@@ -208,7 +216,7 @@ export async function prepareExternalSign(
     feeLabel: feeEstimate.feeLabel,
     operations,
     warnings,
-    submitMethod: bundlerOnlyRule
+    submitMethod: swapAuth.useDelegatedAuth
       ? "bundler-delegated"
       : req.signerType === "freighter"
         ? "delegated"

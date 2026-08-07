@@ -4,15 +4,25 @@ export type ApiErrorBody = {
   error: string;
   code: string;
   message: string;
+  suggestedAction?: string;
 };
 
 export function apiError(params: {
   status: number;
   code: string;
   message: string;
+  suggestedAction?: string;
 }): NextResponse<ApiErrorBody> {
-  const { status, code, message } = params;
-  return NextResponse.json({ error: message, code, message }, { status });
+  const { status, code, message, suggestedAction } = params;
+  return NextResponse.json(
+    {
+      error: message,
+      code,
+      message,
+      ...(suggestedAction ? { suggestedAction } : {}),
+    },
+    { status }
+  );
 }
 
 export class ApiRequestError extends Error {
