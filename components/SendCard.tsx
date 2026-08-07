@@ -17,6 +17,10 @@ import {
   Send,
 } from "lucide-react";
 import type { WalletConnectionResult } from "@/lib/wallets";
+import {
+  ensureContextRuleThen,
+  postSetupSendRules,
+} from "@/lib/context-rule-setup";
 
 const AUTH_PREFIX = "Stellar Smart Account Auth:\n";
 const NETWORK_PASSPHRASE = Networks.TESTNET;
@@ -227,52 +231,53 @@ export function SendCard({
   };
 
   const runSetupSendRules = async (forAssetId: string) => {
-    const body: Record<string, unknown> = {
+    if (!signerType) throw new Error("Signer type required for send-rule setup.");
+
+    const setup = await postSetupSendRules({
       smartAccountAddress,
       signerType,
       assetId: forAssetId,
-    };
-    if (signerType === "phantom" && wallet) {
-      body.publicKeyHex = wallet.publicKeyHex;
-    }
-    if (signerType === "passkey" && passkeySession) {
-      body.keyDataHex = passkeySession.keyDataHex;
-    }
-    if (signerType === "freighter" && wallet?.gAddress) {
-      body.gAddress = wallet.gAddress;
-    }
-
-    const setupRes = await fetch("/api/smart-account/setup-send-rules", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      ...(signerType === "phantom" && wallet
+        ? { publicKeyHex: wallet.publicKeyHex }
+        : {}),
+      ...(signerType === "passkey" && passkeySession
+        ? { keyDataHex: passkeySession.keyDataHex }
+        : {}),
+      ...(signerType === "freighter" && wallet?.gAddress
+        ? { gAddress: wallet.gAddress }
+        : {}),
     });
-    const setup = await setupRes.json();
-    if (!setupRes.ok) throw new Error(setup.error ?? "Setup build failed");
     if (setup.alreadyConfigured) return;
 
     await submitBuiltTx(setup);
   };
 
   const buildSendWithSetup = async (buildBody: Record<string, unknown>) => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const buildRes = await fetch("/api/transaction/build-send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildBody),
-      });
-      const build = await buildRes.json();
-
-      if (buildRes.ok) return build;
-
-      if (buildRes.status === 409 && build.code === "NO_CONTEXT_RULE") {
-        await runSetupSendRules(String(buildBody.assetId ?? assetId));
-        continue;
+    return ensureContextRuleThen(
+      async () => {
+        const buildRes = await fetch("/api/transaction/build-send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildBody),
+        });
+        const build = (await buildRes.json()) as Record<string, unknown> & {
+          code?: string;
+          error?: string;
+        };
+        if (buildRes.ok) return { ok: true as const, value: build };
+        return {
+          ok: false as const,
+          status: buildRes.status,
+          code: build.code,
+          message: build.error ?? "Build failed",
+        };
+      },
+      {
+        onNeedsSetup: () => setSendState("signing"),
+        runSetup: () =>
+          runSetupSendRules(String(buildBody.assetId ?? assetId)),
       }
-
-      throw new Error(build.error ?? "Build failed");
-    }
-    throw new Error("Send setup did not complete. Try again.");
+    );
   };
 
   const handleSend = async () => {
