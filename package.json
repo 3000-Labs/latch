@@ -16,7 +16,8 @@
     "test:sign-demo:unit": "node --test lib/sign-demo/*.test.mjs",
     "test:sign-demo": "node scripts/test-sign-demo-api.mjs",
     "test:sign-demo:all": "node --test lib/sign-demo/*.test.mjs && node scripts/test-sign-demo-api.mjs",
-    "test:on-ramp:session": "node scripts/test-on-ramp-session.mjs"
+    "test:on-ramp:session": "node scripts/test-on-ramp-session.mjs",
+    "test:dummy-on-ramp": "node scripts/test-dummy-on-ramp.mjs"
   },
   "dependencies": {
     "@eslint/eslintrc": "latest",
